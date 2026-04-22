@@ -454,13 +454,27 @@ def _scrape_layout():
                 ], md=8),
                 dbc.Col([
                     html.H6("Run Options", className="fw-bold text-primary mb-2"),
-                    dbc.Button("▶  Scrape Due Sources", id="scrape-btn",
-                               color="primary", size="md", className="d-block w-100 mb-2"),
-                    dbc.Button("⚡  Force All Sources",  id="scrape-force-btn",
-                               color="outline-warning", size="md", className="d-block w-100 mb-2"),
-                    dbc.Button("⏹  Stop",               id="scrape-stop-btn",
-                               color="danger", size="md", className="d-block w-100",
-                               disabled=True),
+                    dbc.Button([
+                        "▶  Scrape Due Sources ",
+                        html.Sup("ⓘ", style={"fontSize": "0.65em", "opacity": "0.7"}),
+                    ], id="scrape-btn", color="primary", size="md", className="d-block w-100 mb-2"),
+                    dbc.Tooltip("Fetches only sources that are due based on their schedule (daily / weekly / monthly). Skips sources scraped recently.",
+                                target="scrape-btn", placement="left"),
+
+                    dbc.Button([
+                        "⚡  Force All Sources ",
+                        html.Sup("ⓘ", style={"fontSize": "0.65em", "opacity": "0.7"}),
+                    ], id="scrape-force-btn", color="outline-warning", size="md", className="d-block w-100 mb-2"),
+                    dbc.Tooltip("Ignores the schedule and scrapes every source immediately. Use for a full refresh or after adding new sources.",
+                                target="scrape-force-btn", placement="left"),
+
+                    dbc.Button([
+                        "⏹  Stop ",
+                        html.Sup("ⓘ", style={"fontSize": "0.65em", "opacity": "0.7"}),
+                    ], id="scrape-stop-btn", color="danger", size="md", className="d-block w-100", disabled=True),
+                    dbc.Tooltip("Terminates the running scrape process. Articles already summarised and stored will be kept.",
+                                target="scrape-stop-btn", placement="left"),
+
                     html.Div(id="scrape-status-badge", className="mt-3 text-center"),
                 ], md=4),
             ]),
@@ -586,8 +600,15 @@ def _create_page():
 
             dbc.Row([
                 dbc.Col([
-                    dbc.Button("Select All", id="cr-select-all", color="outline-primary", size="sm", className="me-2"),
-                    dbc.Button("Clear",      id="cr-clear",      color="outline-secondary", size="sm"),
+                    dbc.Button(["Select All ", html.Sup("ⓘ", style={"fontSize": "0.65em", "opacity": "0.7"})],
+                               id="cr-select-all", color="outline-primary", size="sm", className="me-2"),
+                    dbc.Tooltip("Selects every article currently visible after applying your filters.",
+                                target="cr-select-all", placement="top"),
+
+                    dbc.Button(["Clear ", html.Sup("ⓘ", style={"fontSize": "0.65em", "opacity": "0.7"})],
+                               id="cr-clear", color="outline-secondary", size="sm"),
+                    dbc.Tooltip("Deselects all articles without changing your filters.",
+                                target="cr-clear", placement="top"),
                 ], md=6),
                 dbc.Col(html.Div(id="cr-selected-badge", className="text-end"), md=6),
             ], className="mb-2"),
@@ -629,23 +650,27 @@ def _create_page():
                 dbc.Col(
                     dbc.Card(dbc.CardBody([
                         html.H4("✉️", className="text-center mb-1", style={"fontSize": "2rem"}),
-                        html.H6("Newsletter", className="text-center fw-bold"),
+                        html.H6(["Newsletter ", html.Sup("ⓘ", style={"fontSize": "0.65em", "opacity": "0.7"})],
+                                className="text-center fw-bold"),
                         html.P("A structured digest with sections, editor commentary, and a closing.",
                                className="text-muted small text-center mb-0"),
                     ]), id="cr-type-newsletter",
                        style={"cursor": "pointer", "border": "2px solid transparent"},
                        className="h-100"),
+                    dbc.Tooltip("Generates a structured email digest with themed sections, article summaries, editor commentary, and a closing note.", target="cr-type-newsletter", placement="bottom"),
                     md=4,
                 ),
                 dbc.Col(
                     dbc.Card(dbc.CardBody([
                         html.H4("📝", className="text-center mb-1", style={"fontSize": "2rem"}),
-                        html.H6("Blog Post", className="text-center fw-bold"),
+                        html.H6(["Blog Post ", html.Sup("ⓘ", style={"fontSize": "0.65em", "opacity": "0.7"})],
+                                className="text-center fw-bold"),
                         html.P("A long-form article with intro, analysed sections, conclusion, and SEO tags.",
                                className="text-muted small text-center mb-0"),
                     ]), id="cr-type-blog",
                        style={"cursor": "pointer", "border": "2px solid transparent"},
                        className="h-100"),
+                    dbc.Tooltip("Generates a long-form UK personal finance blog post with an intro, analysed sections, conclusion, and SEO tags for publishing.", target="cr-type-blog", placement="bottom"),
                     md=4,
                 ),
             ], className="g-3"),
@@ -655,8 +680,9 @@ def _create_page():
         # --- Step 3: Generate ---
         dbc.Card(dbc.CardBody([
             html.H6("Step 3 — Generate", className="fw-bold text-primary mb-3"),
-            dbc.Button("⚡  Generate Content", id="cr-generate-btn", color="success",
-                       size="lg", disabled=True),
+            dbc.Button(["⚡  Generate Content ", html.Sup("ⓘ", style={"fontSize": "0.65em", "opacity": "0.7"})],
+                       id="cr-generate-btn", color="success", size="lg", disabled=True),
+            dbc.Tooltip("Sends your selected articles to Claude to generate your chosen content type. This may take 10–30 seconds depending on article count.", target="cr-generate-btn", placement="top"),
             html.P(id="cr-generate-hint", className="text-muted small mt-2 mb-0",
                    children="Select at least one article and a content type first."),
         ]), className="mb-3 shadow-sm"),
