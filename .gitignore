@@ -1,0 +1,20 @@
+# Environment — never commit secrets
+.env
+
+# Database and generated output
+data/
+output/
+
+# Python virtual environment
+venv/
+__pycache__/
+*.py[cod]
+*.pyo
+.DS_Store
+
+# Claude Code internals
+.claude/
+
+# Editor
+.vscode/
+.idea/
