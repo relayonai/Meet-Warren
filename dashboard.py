@@ -647,7 +647,7 @@ def _create_page():
         dbc.Card(dbc.CardBody([
             html.H6("Step 2 — Choose Content Type", className="fw-bold text-primary mb-3"),
             dbc.Row([
-                dbc.Col(
+                dbc.Col([
                     dbc.Card(dbc.CardBody([
                         html.H4("✉️", className="text-center mb-1", style={"fontSize": "2rem"}),
                         html.H6(["Newsletter ", html.Sup("ⓘ", style={"fontSize": "0.65em", "opacity": "0.7"})],
@@ -658,9 +658,8 @@ def _create_page():
                        style={"cursor": "pointer", "border": "2px solid transparent"},
                        className="h-100"),
                     dbc.Tooltip("Generates a structured email digest with themed sections, article summaries, editor commentary, and a closing note.", target="cr-type-newsletter", placement="bottom"),
-                    md=4,
-                ),
-                dbc.Col(
+                ], md=4),
+                dbc.Col([
                     dbc.Card(dbc.CardBody([
                         html.H4("📝", className="text-center mb-1", style={"fontSize": "2rem"}),
                         html.H6(["Blog Post ", html.Sup("ⓘ", style={"fontSize": "0.65em", "opacity": "0.7"})],
@@ -671,8 +670,7 @@ def _create_page():
                        style={"cursor": "pointer", "border": "2px solid transparent"},
                        className="h-100"),
                     dbc.Tooltip("Generates a long-form UK personal finance blog post with an intro, analysed sections, conclusion, and SEO tags for publishing.", target="cr-type-blog", placement="bottom"),
-                    md=4,
-                ),
+                ], md=4),
             ], className="g-3"),
             dcc.Store(id="cr-content-type", data=None),
         ]), className="mb-3 shadow-sm"),
