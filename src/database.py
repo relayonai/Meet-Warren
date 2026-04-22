@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from typing import Iterable, List, Optional
+from typing import List, Optional
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS articles (
@@ -16,11 +16,17 @@ CREATE TABLE IF NOT EXISTS articles (
     summary TEXT,
     category TEXT,
     relevance_score INTEGER,
+    scrape_frequency TEXT DEFAULT 'daily',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-CREATE INDEX IF NOT EXISTS idx_published ON articles(published_at);
-CREATE INDEX IF NOT EXISTS idx_category  ON articles(category);
+CREATE INDEX IF NOT EXISTS idx_published  ON articles(published_at);
+CREATE INDEX IF NOT EXISTS idx_category   ON articles(category);
+CREATE INDEX IF NOT EXISTS idx_frequency  ON articles(scrape_frequency);
 """
+
+_MIGRATIONS = [
+    "ALTER TABLE articles ADD COLUMN scrape_frequency TEXT DEFAULT 'daily'",
+]
 
 
 def get_connection(path: str) -> sqlite3.Connection:
@@ -33,6 +39,13 @@ def get_connection(path: str) -> sqlite3.Connection:
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
     conn.commit()
+    # Safe migrations — ignore if column already exists
+    for sql in _MIGRATIONS:
+        try:
+            conn.execute(sql)
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
 
 
 def existing_urls(conn: sqlite3.Connection) -> set[str]:
@@ -40,13 +53,19 @@ def existing_urls(conn: sqlite3.Connection) -> set[str]:
     return {row["url"] for row in rows}
 
 
-def insert_article(conn: sqlite3.Connection, article, summary: dict) -> bool:
-    """Insert an article + its summary. Returns True if inserted, False if it already existed."""
+def insert_article(
+    conn: sqlite3.Connection,
+    article,
+    summary: dict,
+    frequency: str = "daily",
+) -> bool:
+    """Insert an article + its summary. Returns True if inserted, False if already existed."""
     cur = conn.execute(
         """
         INSERT OR IGNORE INTO articles
-            (id, url, title, source, published_at, raw_content, summary, category, relevance_score)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (id, url, title, source, published_at, raw_content,
+             summary, category, relevance_score, scrape_frequency)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             article.id,
@@ -58,6 +77,7 @@ def insert_article(conn: sqlite3.Connection, article, summary: dict) -> bool:
             json.dumps(summary, ensure_ascii=False),
             summary.get("category"),
             int(summary.get("relevance_score") or 0),
+            frequency,
         ),
     )
     conn.commit()
@@ -70,6 +90,8 @@ def query_articles(
     limit: int = 20,
     category: Optional[str] = None,
     since: Optional[str] = None,
+    frequency: Optional[str] = None,
+    ids: Optional[List[str]] = None,
 ) -> List[sqlite3.Row]:
     sql = "SELECT * FROM articles WHERE 1=1"
     params: list = []
@@ -79,6 +101,13 @@ def query_articles(
     if since:
         sql += " AND (published_at >= ? OR (published_at IS NULL AND created_at >= ?))"
         params.extend([since, since])
+    if frequency:
+        sql += " AND scrape_frequency = ?"
+        params.append(frequency)
+    if ids:
+        placeholders = ",".join("?" * len(ids))
+        sql += f" AND id IN ({placeholders})"
+        params.extend(ids)
     sql += " ORDER BY COALESCE(published_at, created_at) DESC LIMIT ?"
     params.append(limit)
     return conn.execute(sql, params).fetchall()

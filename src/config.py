@@ -14,6 +14,20 @@ def _split_csv(value: str | None) -> List[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def _parse_schedules(value: str | None) -> dict:
+    """Parse 'Source Name=frequency,...' into a dict.
+    Frequency must be one of: daily, weekly, monthly.
+    """
+    if not value:
+        return {}
+    result = {}
+    for item in value.split(","):
+        if "=" in item:
+            key, freq = item.split("=", 1)
+            result[key.strip()] = freq.strip().lower()
+    return result
+
+
 def _bool(value: str | None, default: bool = False) -> bool:
     if value is None:
         return default
@@ -28,6 +42,7 @@ class Config:
     rss_feeds: List[str]
     http_sources: List[str]
     govuk_orgs: List[str]
+    source_schedules: dict
     min_relevance_score: int
     db_path: str
     output_dir: str
@@ -62,6 +77,7 @@ def load_config() -> Config:
         rss_feeds=_split_csv(os.getenv("RSS_FEEDS")),
         http_sources=_split_csv(os.getenv("HTTP_SOURCES")),
         govuk_orgs=_split_csv(os.getenv("GOVUK_ORGS")),
+        source_schedules=_parse_schedules(os.getenv("SOURCE_SCHEDULES")),
         min_relevance_score=int(os.getenv("MIN_RELEVANCE_SCORE", "6")),
         db_path=os.getenv("DB_PATH", "./data/articles.db").strip(),
         output_dir=os.getenv("OUTPUT_DIR", "./output").strip(),

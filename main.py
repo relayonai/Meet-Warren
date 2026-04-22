@@ -69,6 +69,14 @@ def scrape() -> None:
     client = build_anthropic_client(cfg)
     inserted = skipped_relevance = 0
 
+    # Build source → frequency lookup (match by substring of source name)
+    def _frequency_for(source: str) -> str:
+        sl = source.lower()
+        for name, freq in cfg.source_schedules.items():
+            if name.lower() in sl or sl in name.lower():
+                return freq
+        return "daily"
+
     for art in prefiltered:
         click.echo(f"  -> {art.source}: {art.title[:70]}")
         summary = summarise(art, client, cfg.anthropic_model)
@@ -81,9 +89,10 @@ def scrape() -> None:
             skipped_relevance += 1
             continue
 
-        if insert_article(conn, art, summary):
+        freq = _frequency_for(art.source)
+        if insert_article(conn, art, summary, frequency=freq):
             inserted += 1
-            click.echo(f"     stored  (score {score}, category={summary.get('category')})")
+            click.echo(f"     stored  (score {score}, category={summary.get('category')}, freq={freq})")
 
     click.echo(
         f"Done. fetched={len(raw)} deduped={len(new)} "
