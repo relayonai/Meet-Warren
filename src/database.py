@@ -19,13 +19,14 @@ CREATE TABLE IF NOT EXISTS articles (
     scrape_frequency TEXT DEFAULT 'daily',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-CREATE INDEX IF NOT EXISTS idx_published  ON articles(published_at);
-CREATE INDEX IF NOT EXISTS idx_category   ON articles(category);
-CREATE INDEX IF NOT EXISTS idx_frequency  ON articles(scrape_frequency);
+CREATE INDEX IF NOT EXISTS idx_published ON articles(published_at);
+CREATE INDEX IF NOT EXISTS idx_category  ON articles(category);
 """
 
+# Applied in order; each is silently skipped if the change already exists.
 _MIGRATIONS = [
     "ALTER TABLE articles ADD COLUMN scrape_frequency TEXT DEFAULT 'daily'",
+    "CREATE INDEX IF NOT EXISTS idx_frequency ON articles(scrape_frequency)",
 ]
 
 
