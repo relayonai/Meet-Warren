@@ -25,6 +25,8 @@ RSS_SOURCE_OVERRIDES: dict[str, str] = {
     "https://www.bankofengland.co.uk/rss/news": "Bank of England",
     "https://www.fca.org.uk/rss.xml": "Financial Conduct Authority (FCA)",
     "http://feeds.bbci.co.uk/news/business/your_money/rss.xml": "BBC Your Money",
+    "https://www.ft.com/personal-finance?format=rss": "Financial Times",
+    "https://moneyweek.com/feed/": "MoneyWeek",
 }
 
 # Title-level keyword pre-filter — any match passes through to summarisation.
