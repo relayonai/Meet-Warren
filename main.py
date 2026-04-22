@@ -10,8 +10,11 @@ from src.config import build_anthropic_client, load_config
 from src.database import (
     existing_urls,
     get_connection,
+    get_source_log,
     init_db,
     insert_article,
+    is_source_due,
+    mark_source_scraped,
     query_articles,
 )
 from src.deduplicator import filter_new
@@ -19,6 +22,7 @@ from src.formatter import to_html, to_text
 from src.generator import generate_newsletter
 from src.publisher import publish
 from src.scraper import (
+    RSS_SOURCE_OVERRIDES,
     fetch_govuk_api,
     fetch_http,
     fetch_rss,
@@ -38,29 +42,90 @@ def cli() -> None:
 
 
 @cli.command()
-def scrape() -> None:
+@click.option("--force", is_flag=True, default=False,
+              help="Ignore schedule and scrape all sources regardless of last run.")
+def scrape(force: bool) -> None:
     """Fetch, deduplicate, pre-filter, summarise, and store new articles."""
     cfg = load_config()
     conn = get_connection(cfg.db_path)
     init_db(conn)
 
-    click.echo("Fetching from all sources...")
-    raw = (
-        fetch_rss(cfg.rss_feeds)
-        + fetch_govuk_api(cfg.govuk_orgs)
-        + fetch_http(cfg.http_sources)
-    )
-    click.echo(f"Fetched {len(raw)} candidate articles.")
+    def _frequency_for(source_name: str) -> str:
+        sl = source_name.lower()
+        for name, freq in cfg.source_schedules.items():
+            if name.lower() in sl or sl in name.lower():
+                return freq
+        return "daily"
 
-    # Dedup against DB
+    def _source_name_for_rss(url: str) -> str:
+        return RSS_SOURCE_OVERRIDES.get(url, url)
+
+    # -----------------------------------------------------------------------
+    # Collect articles source by source, respecting schedule
+    # -----------------------------------------------------------------------
+    raw = []
+    skipped_sources = []
+
+    # RSS feeds
+    for url in cfg.rss_feeds:
+        name = _source_name_for_rss(url)
+        freq = _frequency_for(name)
+        if not force and not is_source_due(conn, url, freq):
+            skipped_sources.append((name, freq))
+            click.echo(f"  ⏭  {name} ({freq}) — not due yet, skipping")
+            continue
+        click.echo(f"  ⬇  {name} ({freq})")
+        articles = fetch_rss([url])
+        raw.extend(articles)
+        mark_source_scraped(conn, url, name, freq)
+        click.echo(f"      fetched {len(articles)}")
+
+    # GOV.UK API orgs
+    GOVUK_NAMES = {
+        "office-for-national-statistics": "Office For National Statistics",
+        "hm-revenue-customs":             "Hm Revenue Customs",
+    }
+    for slug in cfg.govuk_orgs:
+        name = GOVUK_NAMES.get(slug, slug.replace("-", " ").title())
+        freq = _frequency_for(name)
+        if not force and not is_source_due(conn, slug, freq):
+            skipped_sources.append((name, freq))
+            click.echo(f"  ⏭  {name} ({freq}) — not due yet, skipping")
+            continue
+        click.echo(f"  ⬇  {name} ({freq})")
+        articles = fetch_govuk_api([slug])
+        raw.extend(articles)
+        mark_source_scraped(conn, slug, name, freq)
+        click.echo(f"      fetched {len(articles)}")
+
+    # Generic HTTP sources
+    for url in cfg.http_sources:
+        freq = _frequency_for(url)
+        if not force and not is_source_due(conn, url, freq):
+            click.echo(f"  ⏭  {url} ({freq}) — not due yet, skipping")
+            continue
+        click.echo(f"  ⬇  {url} ({freq})")
+        articles = fetch_http([url])
+        raw.extend(articles)
+        mark_source_scraped(conn, url, url, freq)
+        click.echo(f"      fetched {len(articles)}")
+
+    if not raw and skipped_sources:
+        click.echo(f"\nAll sources are up to date. Run with --force to override.")
+        return
+
+    click.echo(f"\nFetched {len(raw)} articles total.")
+
+    # -----------------------------------------------------------------------
+    # Dedup → pre-filter → summarise → store
+    # -----------------------------------------------------------------------
     new = filter_new(raw, existing_urls(conn))
     click.echo(f"{len(new)} new after URL dedup.")
 
-    # Pre-filter by title keywords (cheap, no API call)
     prefiltered = [a for a in new if title_passes_prefilter(a.title)]
-    skipped_prefilter = len(new) - len(prefiltered)
-    if skipped_prefilter:
-        click.echo(f"{skipped_prefilter} dropped by keyword pre-filter, {len(prefiltered)} remain.")
+    dropped_kw  = len(new) - len(prefiltered)
+    if dropped_kw:
+        click.echo(f"{dropped_kw} dropped by keyword pre-filter, {len(prefiltered)} remain.")
 
     if not prefiltered:
         click.echo("Nothing to summarise. Done.")
@@ -68,14 +133,6 @@ def scrape() -> None:
 
     client = build_anthropic_client(cfg)
     inserted = skipped_relevance = 0
-
-    # Build source → frequency lookup (match by substring of source name)
-    def _frequency_for(source: str) -> str:
-        sl = source.lower()
-        for name, freq in cfg.source_schedules.items():
-            if name.lower() in sl or sl in name.lower():
-                return freq
-        return "daily"
 
     for art in prefiltered:
         click.echo(f"  -> {art.source}: {art.title[:70]}")
@@ -92,18 +149,64 @@ def scrape() -> None:
         freq = _frequency_for(art.source)
         if insert_article(conn, art, summary, frequency=freq):
             inserted += 1
-            click.echo(f"     stored  (score {score}, category={summary.get('category')}, freq={freq})")
+            click.echo(f"     stored  (score {score}, cat={summary.get('category')}, freq={freq})")
 
     click.echo(
-        f"Done. fetched={len(raw)} deduped={len(new)} "
-        f"prefiltered={skipped_prefilter} low-score={skipped_relevance} inserted={inserted}."
+        f"\nDone. fetched={len(raw)} deduped={len(new)} "
+        f"prefiltered={dropped_kw} low-score={skipped_relevance} inserted={inserted}."
     )
+    if skipped_sources:
+        click.echo(f"Skipped {len(skipped_sources)} source(s) not yet due: "
+                   f"{', '.join(n for n, _ in skipped_sources)}")
 
 
 @cli.command()
-@click.option("--limit", type=int, default=20, help="Max articles to include.")
-@click.option("--category", default=None, help="Filter by category (e.g. mortgages).")
-@click.option("--since", default=None, help="ISO date (YYYY-MM-DD) lower bound.")
+def schedule() -> None:
+    """Show the scrape schedule — which sources are due and which are waiting."""
+    cfg = load_config()
+    conn = get_connection(cfg.db_path)
+    init_db(conn)
+
+    from src.scraper import RSS_SOURCE_OVERRIDES
+    from src.database import FREQ_DAYS
+    from datetime import datetime, timezone
+
+    GOVUK_NAMES = {
+        "office-for-national-statistics": "Office For National Statistics",
+        "hm-revenue-customs":             "Hm Revenue Customs",
+    }
+
+    def _frequency_for(name: str) -> str:
+        sl = name.lower()
+        for k, v in cfg.source_schedules.items():
+            if k.lower() in sl or sl in k.lower():
+                return v
+        return "daily"
+
+    all_sources = (
+        [(url, RSS_SOURCE_OVERRIDES.get(url, url)) for url in cfg.rss_feeds] +
+        [(slug, GOVUK_NAMES.get(slug, slug)) for slug in cfg.govuk_orgs]
+    )
+
+    log_rows = {r["source_key"]: r for r in get_source_log(conn)}
+
+    click.echo(f"\n{'Source':<40} {'Freq':<8} {'Last Scraped':<22} {'Status'}")
+    click.echo("-" * 85)
+    for key, name in all_sources:
+        freq    = _frequency_for(name)
+        row     = log_rows.get(key)
+        last    = row["last_scraped_at"] if row else None
+        due     = is_source_due(conn, key, freq)
+        status  = click.style("● DUE",  fg="green") if due else click.style("○ waiting", fg="yellow")
+        last_str = last[:19].replace("T", " ") if last else "never"
+        click.echo(f"{name:<40} {freq:<8} {last_str:<22} {status}")
+    click.echo()
+
+
+@cli.command()
+@click.option("--limit",    type=int,  default=20, help="Max articles to include.")
+@click.option("--category", default=None,          help="Filter by category.")
+@click.option("--since",    default=None,          help="ISO date lower bound (YYYY-MM-DD).")
 def generate(limit: int, category: str | None, since: str | None) -> None:
     """Generate and publish a newsletter from stored articles."""
     cfg = load_config()
@@ -112,7 +215,7 @@ def generate(limit: int, category: str | None, since: str | None) -> None:
 
     rows = query_articles(conn, limit=limit, category=category, since=since)
     if not rows:
-        click.echo("No matching articles in the database. Run `scrape` first.")
+        click.echo("No matching articles. Run `scrape` first.")
         sys.exit(1)
 
     summaries = []

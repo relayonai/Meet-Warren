@@ -388,28 +388,90 @@ def show_br_detail(selected_rows, data):
 
 # --- Scrape -----------------------------------------------------------------
 
+def _schedule_table() -> dbc.Table:
+    """Build a live source schedule status table from the DB."""
+    from src.database import get_source_log, is_source_due, FREQ_DAYS
+    from src.scraper import RSS_SOURCE_OVERRIDES
+
+    GOVUK_NAMES = {
+        "office-for-national-statistics": "Office For National Statistics",
+        "hm-revenue-customs":             "Hm Revenue Customs",
+    }
+
+    def _freq_for(name: str) -> str:
+        sl = name.lower()
+        for k, v in cfg.source_schedules.items():
+            if k.lower() in sl or sl in k.lower():
+                return v
+        return "daily"
+
+    try:
+        conn = get_connection(cfg.db_path)
+        init_db(conn)
+        log_rows = {r["source_key"]: r for r in get_source_log(conn)}
+        conn.close()
+    except Exception:
+        log_rows = {}
+
+    all_sources = (
+        [(url, RSS_SOURCE_OVERRIDES.get(url, url)) for url in cfg.rss_feeds] +
+        [(slug, GOVUK_NAMES.get(slug, slug)) for slug in cfg.govuk_orgs]
+    )
+
+    rows = []
+    for key, name in all_sources:
+        freq   = _freq_for(name)
+        row    = log_rows.get(key)
+        last   = row["last_scraped_at"][:19].replace("T", " ") if (row and row["last_scraped_at"]) else "Never"
+        due    = not row or not row["last_scraped_at"] or is_source_due(
+            get_connection(cfg.db_path), key, freq
+        )
+        badge  = dbc.Badge("● Due",     color="success", className="me-1") if due \
+            else dbc.Badge("○ Waiting", color="secondary", className="me-1")
+        freq_color = {"daily": "success", "weekly": "primary", "monthly": "warning"}.get(freq, "secondary")
+        rows.append(html.Tr([
+            html.Td(name,  style={"fontWeight": "500"}),
+            html.Td(dbc.Badge(freq.title(), color=freq_color)),
+            html.Td(last,  className="text-muted", style={"fontSize": "13px"}),
+            html.Td(badge),
+        ]))
+
+    return dbc.Table(
+        [html.Thead(html.Tr([html.Th("Source"), html.Th("Frequency"), html.Th("Last Scraped"), html.Th("Status")])),
+         html.Tbody(rows)],
+        bordered=False, hover=True, size="sm", className="mb-0",
+    )
+
+
 def _scrape_layout():
     return html.Div([
+        # Schedule status card
         dbc.Card(dbc.CardBody([
             dbc.Row([
                 dbc.Col([
-                    html.H5("Run Scrape Pipeline", className="fw-bold mb-1"),
-                    html.P("Fetches all sources, applies keyword pre-filter + relevance gate, stores new articles.",
-                           className="text-muted mb-3"),
-                    dbc.Button("▶  Start Scrape", id="scrape-btn",      color="primary", size="lg"),
-                    dbc.Button("⏹  Stop",         id="scrape-stop-btn", color="danger",  size="lg",
-                               className="ms-2", disabled=True),
+                    html.H6("Source Schedule", className="fw-bold text-primary mb-2"),
+                    _schedule_table(),
                 ], md=8),
-                dbc.Col(html.Div(id="scrape-status-badge"), md=4,
-                        className="d-flex align-items-center justify-content-end"),
+                dbc.Col([
+                    html.H6("Run Options", className="fw-bold text-primary mb-2"),
+                    dbc.Button("▶  Scrape Due Sources", id="scrape-btn",
+                               color="primary", size="md", className="d-block w-100 mb-2"),
+                    dbc.Button("⚡  Force All Sources",  id="scrape-force-btn",
+                               color="outline-warning", size="md", className="d-block w-100 mb-2"),
+                    dbc.Button("⏹  Stop",               id="scrape-stop-btn",
+                               color="danger", size="md", className="d-block w-100",
+                               disabled=True),
+                    html.Div(id="scrape-status-badge", className="mt-3 text-center"),
+                ], md=4),
             ]),
         ]), className="mb-3 shadow-sm"),
+        # Live log
         dbc.Card(dbc.CardBody([
             html.H6("Live Output", className="text-muted mb-2"),
             html.Pre(id="scrape-log", children="No scrape run yet.", style={
                 "backgroundColor": "#1e1e1e", "color": "#d4d4d4",
                 "padding": "16px", "borderRadius": "6px",
-                "height": "420px", "overflowY": "auto",
+                "height": "400px", "overflowY": "auto",
                 "fontSize": "13px", "fontFamily": "monospace", "whiteSpace": "pre-wrap",
             }),
         ]), className="shadow-sm"),
@@ -419,40 +481,46 @@ def _scrape_layout():
 @app.callback(
     Output("scrape-state",        "data"),
     Output("scrape-btn",          "disabled"),
+    Output("scrape-force-btn",    "disabled"),
     Output("scrape-stop-btn",     "disabled"),
     Output("scrape-interval",     "disabled"),
     Output("scrape-status-badge", "children"),
     Input("scrape-btn",           "n_clicks"),
+    Input("scrape-force-btn",     "n_clicks"),
     Input("scrape-stop-btn",      "n_clicks"),
     State("scrape-state",         "data"),
     prevent_initial_call=True,
 )
-def control_scrape(start_clicks, stop_clicks, state):
+def control_scrape(start_clicks, force_clicks, stop_clicks, state):
     trigger = ctx.triggered_id
-    if trigger == "scrape-btn":
+    if trigger in ("scrape-btn", "scrape-force-btn"):
         if _scrape.get("proc") and _scrape["proc"].poll() is None:
-            return state, True, False, False, _running_badge()
+            return state, True, True, False, False, _running_badge()
         tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".log", delete=False)
         tmp.close()
         _scrape["output_file"] = tmp.name
+        cmd = [VENV_PYTHON, "main.py", "scrape"]
+        if trigger == "scrape-force-btn":
+            cmd.append("--force")
         _scrape["proc"] = subprocess.Popen(
-            [VENV_PYTHON, "main.py", "scrape"],
+            cmd,
             stdout=open(tmp.name, "w"),
             stderr=subprocess.STDOUT,
             cwd=os.path.dirname(os.path.abspath(__file__)),
         )
-        return {"running": True}, True, False, False, _running_badge()
+        return {"running": True}, True, True, False, False, _running_badge()
     if trigger == "scrape-stop-btn":
         if _scrape.get("proc") and _scrape["proc"].poll() is None:
             _scrape["proc"].terminate()
-        return {"running": False}, False, True, True, _idle_badge()
-    return state, False, True, True, _idle_badge()
+        return {"running": False}, False, False, True, True, _idle_badge()
+    return state, False, False, True, True, _idle_badge()
 
 
 @app.callback(
     Output("scrape-log",          "children"),
     Output("scrape-state",        "data",     allow_duplicate=True),
     Output("scrape-btn",          "disabled", allow_duplicate=True),
+    Output("scrape-force-btn",    "disabled", allow_duplicate=True),
     Output("scrape-stop-btn",     "disabled", allow_duplicate=True),
     Output("scrape-interval",     "disabled", allow_duplicate=True),
     Output("scrape-status-badge", "children", allow_duplicate=True),
@@ -470,8 +538,8 @@ def poll_scrape(_, state):
     except Exception:
         text = ""
     if proc.poll() is None:
-        return text or "Starting…", {"running": True}, True, False, False, _running_badge()
-    return text or "(no output)", {"running": False}, False, True, True, _idle_badge()
+        return text or "Starting…", {"running": True}, True, True, False, False, _running_badge()
+    return text or "(no output)", {"running": False}, False, False, True, True, _idle_badge()
 
 
 # ===========================================================================
