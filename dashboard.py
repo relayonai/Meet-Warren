@@ -811,10 +811,13 @@ def generate_content(_, selected_rows, table_data, content_type):
     summaries = []
     for _, row in rows_df.iterrows():
         summaries.append({
-            "title":        row["title"],
-            "url":          row["url"],
-            "summary":      row["summary_text"],
-            "category":     row["category"],
+            "title":           row["title"],
+            "url":             row["url"],
+            "source":          row["source"],
+            "published_at":    row["published_at"],
+            "summary":         row["summary_text"],
+            "key_points":      row["key_points"] if "key_points" in row else [],
+            "category":        row["category"],
             "relevance_score": row["relevance_score"],
         })
 
@@ -836,11 +839,17 @@ def generate_content(_, selected_rows, table_data, content_type):
         text_path = os.path.join(cfg.output_dir, f"newsletter-{stamp}.txt")
         with open(html_path, "w") as f: f.write(out_html)
         with open(text_path, "w") as f: f.write(out_text)
-        sections_list = [
+        sections_list = []
+        if result.get("edition_label"):
+            sections_list.append(dbc.ListGroupItem(f"🗓️ {result['edition_label']}"))
+        pick = result.get("editor_pick") or {}
+        if pick.get("title"):
+            sections_list.append(dbc.ListGroupItem(f"★ Editor's Pick: {pick['title'][:60]}"))
+        sections_list += [
             dbc.ListGroupItem(f"📌 {s.get('heading','')} — {len(s.get('articles',[]))} article(s)")
             for s in result.get("sections", [])
         ]
-        return _content_preview("✉️ Newsletter Generated", subject, html_path, out_html, sections_list)
+        return _content_preview("✉️ Newsletter Generated", subject, html_path, text_path, out_html, sections_list)
 
     if content_type == "blog":
         result = generate_blog_post(summaries, client, cfg.anthropic_model)
@@ -853,22 +862,42 @@ def generate_content(_, selected_rows, table_data, content_type):
         text_path = os.path.join(cfg.output_dir, f"blog-{stamp}.txt")
         with open(html_path, "w") as f: f.write(out_html)
         with open(text_path, "w") as f: f.write(out_text)
-        meta_list = [
+        meta_list = []
+        rt = result.get("reading_time_minutes")
+        if rt:
+            meta_list.append(dbc.ListGroupItem(f"⏱️ {rt} min read"))
+        if result.get("byline"):
+            meta_list.append(dbc.ListGroupItem(f"✍️ {result['byline']}"))
+        kt = result.get("key_takeaways") or []
+        if kt:
+            meta_list.append(dbc.ListGroupItem(f"💡 {len(kt)} key takeaways"))
+        meta_list += [
             dbc.ListGroupItem(f"📌 {s.get('heading', '')}")
             for s in result.get("sections", [])
-        ] + [dbc.ListGroupItem("🏷️ " + " ".join(f"#{t}" for t in result.get("seo_tags", [])))]
-        return _content_preview("📝 Blog Post Generated", title, html_path, out_html, meta_list)
+        ]
+        if result.get("faqs"):
+            meta_list.append(dbc.ListGroupItem(f"❓ {len(result['faqs'])} FAQs"))
+        if result.get("sources_cited"):
+            meta_list.append(dbc.ListGroupItem(f"🔗 {len(result['sources_cited'])} sources cited"))
+        if result.get("seo_tags"):
+            meta_list.append(dbc.ListGroupItem("🏷️ " + " ".join(f"#{t}" for t in result["seo_tags"])))
+        return _content_preview("📝 Blog Post Generated", title, html_path, text_path, out_html, meta_list)
 
     return dbc.Alert("Unknown content type.", color="danger")
 
 
-def _content_preview(badge_title: str, content_title: str, saved_path: str,
-                     preview_html: str, meta_items: list) -> html.Div:
+def _content_preview(badge_title: str, content_title: str, html_path: str,
+                     text_path: str, preview_html: str, meta_items: list) -> html.Div:
     return html.Div([
         dbc.Alert([
             html.Strong(f"✅ {badge_title}: {content_title}"),
             html.Br(),
-            html.Small(f"Saved to {saved_path}"),
+            html.Small([
+                "Saved to ",
+                html.Code(html_path, style={"fontSize": "0.78rem"}),
+                " and ",
+                html.Code(text_path, style={"fontSize": "0.78rem"}),
+            ]),
         ], color="success", className="mb-3"),
         dbc.Row([
             dbc.Col([
@@ -882,7 +911,7 @@ def _content_preview(badge_title: str, content_title: str, saved_path: str,
                     html.H6("Preview", className="text-muted mb-2"),
                     html.Iframe(
                         srcDoc=preview_html,
-                        style={"width": "100%", "height": "580px", "border": "none", "borderRadius": "4px"},
+                        style={"width": "100%", "height": "720px", "border": "none", "borderRadius": "4px"},
                     ),
                 ]), className="shadow-sm"),
             ], md=9),
