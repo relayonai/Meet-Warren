@@ -648,27 +648,35 @@ def _create_page():
             html.H6("Step 2 — Choose Content Type", className="fw-bold text-primary mb-3"),
             dbc.Row([
                 dbc.Col([
-                    dbc.Card(dbc.CardBody([
-                        html.H4("✉️", className="text-center mb-1", style={"fontSize": "2rem"}),
-                        html.H6(["Newsletter ", html.Sup("ⓘ", style={"fontSize": "0.65em", "opacity": "0.7"})],
-                                className="text-center fw-bold"),
-                        html.P("A structured digest with sections, editor commentary, and a closing.",
-                               className="text-muted small text-center mb-0"),
-                    ]), id="cr-type-newsletter",
-                       style={"cursor": "pointer", "border": "2px solid transparent"},
-                       className="h-100"),
+                    html.Div(
+                        dbc.Card(dbc.CardBody([
+                            html.H4("✉️", className="text-center mb-1", style={"fontSize": "2rem"}),
+                            html.H6(["Newsletter ", html.Sup("ⓘ", style={"fontSize": "0.65em", "opacity": "0.7"})],
+                                    className="text-center fw-bold"),
+                            html.P("A structured digest with sections, editor commentary, and a closing.",
+                                   className="text-muted small text-center mb-0"),
+                        ]), className="h-100"),
+                        id="cr-type-newsletter",
+                        n_clicks=0,
+                        style={"cursor": "pointer", "border": "2px solid transparent",
+                               "borderRadius": "6px", "height": "100%"},
+                    ),
                     dbc.Tooltip("Generates a structured email digest with themed sections, article summaries, editor commentary, and a closing note.", target="cr-type-newsletter", placement="bottom"),
                 ], md=4),
                 dbc.Col([
-                    dbc.Card(dbc.CardBody([
-                        html.H4("📝", className="text-center mb-1", style={"fontSize": "2rem"}),
-                        html.H6(["Blog Post ", html.Sup("ⓘ", style={"fontSize": "0.65em", "opacity": "0.7"})],
-                                className="text-center fw-bold"),
-                        html.P("A long-form article with intro, analysed sections, conclusion, and SEO tags.",
-                               className="text-muted small text-center mb-0"),
-                    ]), id="cr-type-blog",
-                       style={"cursor": "pointer", "border": "2px solid transparent"},
-                       className="h-100"),
+                    html.Div(
+                        dbc.Card(dbc.CardBody([
+                            html.H4("📝", className="text-center mb-1", style={"fontSize": "2rem"}),
+                            html.H6(["Blog Post ", html.Sup("ⓘ", style={"fontSize": "0.65em", "opacity": "0.7"})],
+                                    className="text-center fw-bold"),
+                            html.P("A long-form article with intro, analysed sections, conclusion, and SEO tags.",
+                                   className="text-muted small text-center mb-0"),
+                        ]), className="h-100"),
+                        id="cr-type-blog",
+                        n_clicks=0,
+                        style={"cursor": "pointer", "border": "2px solid transparent",
+                               "borderRadius": "6px", "height": "100%"},
+                    ),
                     dbc.Tooltip("Generates a long-form UK personal finance blog post with an intro, analysed sections, conclusion, and SEO tags for publishing.", target="cr-type-blog", placement="bottom"),
                 ], md=4),
             ], className="g-3"),
