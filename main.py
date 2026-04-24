@@ -44,11 +44,19 @@ def cli() -> None:
 @cli.command()
 @click.option("--force", is_flag=True, default=False,
               help="Ignore schedule and scrape all sources regardless of last run.")
-def scrape(force: bool) -> None:
+@click.option("--sources", default=None,
+              help="Comma-separated source keys (URLs or GOV.UK slugs) to scrape on demand. "
+                   "Implies --force for the selected sources only.")
+def scrape(force: bool, sources: str | None) -> None:
     """Fetch, deduplicate, pre-filter, summarise, and store new articles."""
     cfg = load_config()
     conn = get_connection(cfg.db_path)
     init_db(conn)
+
+    selected = None
+    if sources:
+        selected = {s.strip() for s in sources.split(",") if s.strip()}
+        click.echo(f"On-demand mode: scraping {len(selected)} selected source(s), ignoring schedule.")
 
     def _frequency_for(source_name: str) -> str:
         sl = source_name.lower()
@@ -70,7 +78,9 @@ def scrape(force: bool) -> None:
     for url in cfg.rss_feeds:
         name = _source_name_for_rss(url)
         freq = _frequency_for(name)
-        if not force and not is_source_due(conn, url, freq):
+        if selected is not None and url not in selected:
+            continue
+        if selected is None and not force and not is_source_due(conn, url, freq):
             skipped_sources.append((name, freq))
             click.echo(f"  ⏭  {name} ({freq}) — not due yet, skipping")
             continue
@@ -88,7 +98,9 @@ def scrape(force: bool) -> None:
     for slug in cfg.govuk_orgs:
         name = GOVUK_NAMES.get(slug, slug.replace("-", " ").title())
         freq = _frequency_for(name)
-        if not force and not is_source_due(conn, slug, freq):
+        if selected is not None and slug not in selected:
+            continue
+        if selected is None and not force and not is_source_due(conn, slug, freq):
             skipped_sources.append((name, freq))
             click.echo(f"  ⏭  {name} ({freq}) — not due yet, skipping")
             continue
@@ -101,7 +113,9 @@ def scrape(force: bool) -> None:
     # Generic HTTP sources
     for url in cfg.http_sources:
         freq = _frequency_for(url)
-        if not force and not is_source_due(conn, url, freq):
+        if selected is not None and url not in selected:
+            continue
+        if selected is None and not force and not is_source_due(conn, url, freq):
             click.echo(f"  ⏭  {url} ({freq}) — not due yet, skipping")
             continue
         click.echo(f"  ⬇  {url} ({freq})")

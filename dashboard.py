@@ -388,6 +388,20 @@ def show_br_detail(selected_rows, data):
 
 # --- Scrape -----------------------------------------------------------------
 
+def _all_sources() -> list[tuple[str, str]]:
+    """Return [(source_key, display_name)] for every configured source."""
+    from src.scraper import RSS_SOURCE_OVERRIDES
+    GOVUK_NAMES = {
+        "office-for-national-statistics": "Office For National Statistics",
+        "hm-revenue-customs":             "Hm Revenue Customs",
+    }
+    return (
+        [(url, RSS_SOURCE_OVERRIDES.get(url, url)) for url in cfg.rss_feeds] +
+        [(slug, GOVUK_NAMES.get(slug, slug)) for slug in cfg.govuk_orgs] +
+        [(url, url) for url in cfg.http_sources]
+    )
+
+
 def _schedule_table() -> dbc.Table:
     """Build a live source schedule status table from the DB."""
     from src.database import get_source_log, is_source_due, FREQ_DAYS
@@ -479,6 +493,36 @@ def _scrape_layout():
                 ], md=4),
             ]),
         ]), className="mb-3 shadow-sm"),
+
+        # On-demand source picker
+        dbc.Card(dbc.CardBody([
+            html.H6("On-Demand Scrape", className="fw-bold text-primary mb-2"),
+            html.P("Pick any sources to scrape right now — schedules are ignored for the selected ones.",
+                   className="text-muted small mb-3"),
+            dbc.Row([
+                dbc.Col([
+                    dcc.Dropdown(
+                        id="scrape-source-picker",
+                        options=[{"label": name, "value": key} for key, name in _all_sources()],
+                        multi=True,
+                        placeholder="Select one or more sources…",
+                    ),
+                ], md=8),
+                dbc.Col([
+                    dbc.ButtonGroup([
+                        dbc.Button("All", id="scrape-pick-all",  color="light", size="sm"),
+                        dbc.Button("Clear", id="scrape-pick-clear", color="light", size="sm"),
+                    ], className="me-2"),
+                    dbc.Button([
+                        "▶  Scrape Selected ",
+                        html.Sup("ⓘ", style={"fontSize": "0.65em", "opacity": "0.7"}),
+                    ], id="scrape-selected-btn", color="success", size="md", disabled=True),
+                    dbc.Tooltip("Runs an immediate scrape against ONLY the sources you ticked above, ignoring their schedule.",
+                                target="scrape-selected-btn", placement="left"),
+                ], md=4, className="text-end"),
+            ]),
+        ]), className="mb-3 shadow-sm"),
+
         # Live log
         dbc.Card(dbc.CardBody([
             html.H6("Live Output", className="text-muted mb-2"),
@@ -493,67 +537,101 @@ def _scrape_layout():
 
 
 @app.callback(
-    Output("scrape-state",        "data"),
-    Output("scrape-btn",          "disabled"),
-    Output("scrape-force-btn",    "disabled"),
-    Output("scrape-stop-btn",     "disabled"),
-    Output("scrape-interval",     "disabled"),
-    Output("scrape-status-badge", "children"),
-    Input("scrape-btn",           "n_clicks"),
-    Input("scrape-force-btn",     "n_clicks"),
-    Input("scrape-stop-btn",      "n_clicks"),
-    State("scrape-state",         "data"),
+    Output("scrape-state",         "data"),
+    Output("scrape-btn",           "disabled"),
+    Output("scrape-force-btn",     "disabled"),
+    Output("scrape-selected-btn",  "disabled", allow_duplicate=True),
+    Output("scrape-stop-btn",      "disabled"),
+    Output("scrape-interval",      "disabled"),
+    Output("scrape-status-badge",  "children"),
+    Input("scrape-btn",            "n_clicks"),
+    Input("scrape-force-btn",      "n_clicks"),
+    Input("scrape-selected-btn",   "n_clicks"),
+    Input("scrape-stop-btn",       "n_clicks"),
+    State("scrape-source-picker",  "value"),
+    State("scrape-state",          "data"),
     prevent_initial_call=True,
 )
-def control_scrape(start_clicks, force_clicks, stop_clicks, state):
+def control_scrape(start_clicks, force_clicks, selected_clicks, stop_clicks,
+                   selected_sources, state):
     trigger = ctx.triggered_id
-    if trigger in ("scrape-btn", "scrape-force-btn"):
+    if trigger in ("scrape-btn", "scrape-force-btn", "scrape-selected-btn"):
         if _scrape.get("proc") and _scrape["proc"].poll() is None:
-            return state, True, True, False, False, _running_badge()
+            return state, True, True, True, False, False, _running_badge()
+        if trigger == "scrape-selected-btn" and not selected_sources:
+            return state, False, False, True, True, True, _idle_badge()
         tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".log", delete=False)
         tmp.close()
         _scrape["output_file"] = tmp.name
         cmd = [VENV_PYTHON, "main.py", "scrape"]
         if trigger == "scrape-force-btn":
             cmd.append("--force")
+        elif trigger == "scrape-selected-btn":
+            cmd += ["--sources", ",".join(selected_sources)]
         _scrape["proc"] = subprocess.Popen(
             cmd,
             stdout=open(tmp.name, "w"),
             stderr=subprocess.STDOUT,
             cwd=os.path.dirname(os.path.abspath(__file__)),
         )
-        return {"running": True}, True, True, False, False, _running_badge()
+        return {"running": True}, True, True, True, False, False, _running_badge()
     if trigger == "scrape-stop-btn":
         if _scrape.get("proc") and _scrape["proc"].poll() is None:
             _scrape["proc"].terminate()
-        return {"running": False}, False, False, True, True, _idle_badge()
-    return state, False, False, True, True, _idle_badge()
+        return {"running": False}, False, False, False, True, True, _idle_badge()
+    return state, False, False, False, True, True, _idle_badge()
 
 
 @app.callback(
-    Output("scrape-log",          "children"),
-    Output("scrape-state",        "data",     allow_duplicate=True),
-    Output("scrape-btn",          "disabled", allow_duplicate=True),
-    Output("scrape-force-btn",    "disabled", allow_duplicate=True),
-    Output("scrape-stop-btn",     "disabled", allow_duplicate=True),
-    Output("scrape-interval",     "disabled", allow_duplicate=True),
-    Output("scrape-status-badge", "children", allow_duplicate=True),
-    Input("scrape-interval",      "n_intervals"),
-    State("scrape-state",         "data"),
+    Output("scrape-log",           "children"),
+    Output("scrape-state",         "data",     allow_duplicate=True),
+    Output("scrape-btn",           "disabled", allow_duplicate=True),
+    Output("scrape-force-btn",     "disabled", allow_duplicate=True),
+    Output("scrape-selected-btn",  "disabled", allow_duplicate=True),
+    Output("scrape-stop-btn",      "disabled", allow_duplicate=True),
+    Output("scrape-interval",      "disabled", allow_duplicate=True),
+    Output("scrape-status-badge",  "children", allow_duplicate=True),
+    Input("scrape-interval",       "n_intervals"),
+    State("scrape-source-picker",  "value"),
+    State("scrape-state",          "data"),
     prevent_initial_call=True,
 )
-def poll_scrape(_, state):
+def poll_scrape(_, picker_value, state):
     output_file = _scrape.get("output_file")
     proc        = _scrape.get("proc")
+    sel_disabled_idle = not bool(picker_value)
     if not output_file or not proc:
-        return no_update, state, False, True, True, _idle_badge()
+        return no_update, state, False, False, sel_disabled_idle, True, True, _idle_badge()
     try:
         text = open(output_file).read()
     except Exception:
         text = ""
     if proc.poll() is None:
-        return text or "Starting…", {"running": True}, True, True, False, False, _running_badge()
-    return text or "(no output)", {"running": False}, False, False, True, True, _idle_badge()
+        return text or "Starting…", {"running": True}, True, True, True, False, False, _running_badge()
+    return text or "(no output)", {"running": False}, False, False, sel_disabled_idle, True, True, _idle_badge()
+
+
+@app.callback(
+    Output("scrape-source-picker", "value"),
+    Input("scrape-pick-all",   "n_clicks"),
+    Input("scrape-pick-clear", "n_clicks"),
+    prevent_initial_call=True,
+)
+def picker_quick_actions(_all, _clear):
+    if ctx.triggered_id == "scrape-pick-all":
+        return [k for k, _ in _all_sources()]
+    return []
+
+
+@app.callback(
+    Output("scrape-selected-btn", "disabled"),
+    Input("scrape-source-picker", "value"),
+    State("scrape-state",         "data"),
+)
+def toggle_selected_btn(picker_value, state):
+    if state and state.get("running"):
+        return True
+    return not bool(picker_value)
 
 
 # ===========================================================================
