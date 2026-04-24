@@ -35,6 +35,9 @@ CREATE TABLE IF NOT EXISTS source_log (
 _MIGRATIONS = [
     "ALTER TABLE articles ADD COLUMN scrape_frequency TEXT DEFAULT 'daily'",
     "CREATE INDEX IF NOT EXISTS idx_frequency ON articles(scrape_frequency)",
+    "ALTER TABLE articles ADD COLUMN compliance_grade TEXT",
+    "ALTER TABLE articles ADD COLUMN compliance_notes TEXT",
+    "CREATE INDEX IF NOT EXISTS idx_compliance_grade ON articles(compliance_grade)",
 ]
 
 FREQ_DAYS = {"daily": 1, "weekly": 7, "monthly": 30}
@@ -69,12 +72,15 @@ def insert_article(
     summary: dict,
     frequency: str = "daily",
 ) -> bool:
+    compliance_grade = summary.get("compliance_grade")
+    compliance_notes = summary.get("compliance_notes")
     cur = conn.execute(
         """
         INSERT OR IGNORE INTO articles
             (id, url, title, source, published_at, raw_content,
-             summary, category, relevance_score, scrape_frequency)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             summary, category, relevance_score, scrape_frequency,
+             compliance_grade, compliance_notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             article.id,
@@ -87,6 +93,8 @@ def insert_article(
             summary.get("category"),
             int(summary.get("relevance_score") or 0),
             frequency,
+            compliance_grade,
+            json.dumps(compliance_notes or [], ensure_ascii=False) if compliance_notes else None,
         ),
     )
     conn.commit()

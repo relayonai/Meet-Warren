@@ -1,0 +1,132 @@
+==========================================
+Daily scrape started: Fri Apr 24 18:50:10 BST 2026
+==========================================
+/Users/keremyilmaz/Warren Workflow/venv/lib/python3.9/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+  ⬇  Bank of England (weekly)
+      fetched 50
+  ⬇  Financial Conduct Authority (FCA) (weekly)
+      fetched 20
+  ⬇  BBC Your Money (daily)
+      fetched 24
+  ⬇  Financial Times (weekly)
+      fetched 25
+  ⬇  MoneyWeek (weekly)
+      fetched 50
+  ⬇  Office For National Statistics (monthly)
+      fetched 20
+  ⬇  Hm Revenue Customs (monthly)
+      fetched 20
+
+Fetched 209 articles total.
+111 new after URL dedup.
+76 dropped by keyword pre-filter, 35 remain.
+  -> Bank of England: FPC review of UK bank capital – summary of stakeholder evidence gather
+2026-04-24 18:50:19,967 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+     skipped (score 4 < 6)
+  -> Bank of England: Banknote imagery advisory group minutes - October 2025
+2026-04-24 18:50:24,562 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+     skipped (score 3 < 6)
+  -> Bank of England: Banknotes imagery advisory group minutes - August 2025
+2026-04-24 18:50:30,033 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+     skipped (score 2 < 6)
+  -> Bank of England: Artificial Intelligence Consortium minutes – February 2026
+2026-04-24 18:50:33,507 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+     skipped (score 4 < 6)
+  -> Bank of England: FXJSC Combined Operations and Legal Sub-Committee Meeting
+2026-04-24 18:50:36,391 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+     skipped (score 2 < 6)
+  -> Bank of England: Minutes of the Money Market Committee meeting – March 2026
+2026-04-24 18:50:40,754 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+     skipped (score 3 < 6)
+  -> Bank of England: Changes to publication dates of the Decision Maker Panel data and Agen
+2026-04-24 18:50:44,249 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+     skipped (score 3 < 6)
+  -> Bank of England: Bank of England streamlines reporting and disclosure requirements for 
+2026-04-24 18:50:48,737 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+     skipped (score 4 < 6)
+  -> Bank of England: Wildlife to feature on next series of  Bank of England banknotes
+2026-04-24 18:50:52,879 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+     skipped (score 3 < 6)
+  -> Bank of England: Statistical Notice 2026/02 - BEEDS user acceptance testing (UAT) envir
+2026-04-24 18:50:57,948 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+     skipped (score 2 < 6)
+  -> Bank of England: Update on changes to country groupings for International Banking Stati
+2026-04-24 18:51:03,238 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+     skipped (score 2 < 6)
+  -> Bank of England: Letter from Ruth Smith on firms’ preparations for the third Resolvabil
+2026-04-24 18:51:08,698 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+     skipped (score 4 < 6)
+  -> Bank of England: Statistical Notice 2026/01 - Bank of England Levy: Deadline for Eligib
+2026-04-24 18:51:13,624 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+     skipped (score 2 < 6)
+  -> Bank of England: Minutes of the UK Money Markets Code Sub-Committee – December 2025
+2026-04-24 18:51:16,729 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+     skipped (score 3 < 6)
+  -> Bank of England: Minutes of the Money Market Committee meeting – December 2025
+2026-04-24 18:51:20,377 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+     skipped (score 3 < 6)
+  -> Financial Conduct Authority (FCA): FCA looks for members for its advisory committee on secondary markets
+2026-04-24 18:51:25,330 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+     skipped (score 4 < 6)
+  -> Financial Conduct Authority (FCA): FCA and PRA confirm changes to streamline senior manager accountabilit
+2026-04-24 18:51:32,038 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+     skipped (score 4 < 6)
+  -> Financial Conduct Authority (FCA): Join the Financial Services Consumer Panel – vacancies now open
+2026-04-24 18:51:36,842 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+     skipped (score 4 < 6)
+  -> Financial Conduct Authority (FCA): FCA introduces clearer and simpler short selling rules
+2026-04-24 18:51:41,513 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+     skipped (score 4 < 6)
+  -> BBC Your Money: What issues matter to voters in Crawley's local elections?
+2026-04-24 18:51:46,620 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+     skipped (score 1 < 6)
+  -> Financial Times: Directors’ Deals: finance chief sells ICA shares ahead of exit
+2026-04-24 18:51:50,316 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+     skipped (score 3 < 6)
+  -> Financial Times: Home Depot courts contractors as US economy weighs on the DIY set
+2026-04-24 18:51:55,008 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+     skipped (score 2 < 6)
+  -> Financial Times: Out of office, still hyper-responsive
+2026-04-24 18:51:58,677 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+     skipped (score 3 < 6)
+  -> MoneyWeek: Gotta catch ’em all! – Pokémon cards fetch millions at auction
+2026-04-24 18:52:02,989 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+     skipped (score 4 < 6)
+  -> Office For National Statistics: Construction output in Great Britain: May 2026
+2026-04-24 18:52:07,038 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+     skipped (score 2 < 6)
+  -> Office For National Statistics: Comparing ONS UK economic data with Purchasing Managers' Index surveys
+2026-04-24 18:52:13,011 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+     skipped (score 4 < 6)
+  -> Office For National Statistics: Quarterly suicide death registrations in England: 2001 to 2025 registr
+2026-04-24 18:52:17,878 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+     skipped (score 1 < 6)
+  -> Office For National Statistics: Construction output in Great Britain: April 2026
+2026-04-24 18:52:22,374 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+     skipped (score 3 < 6)
+  -> Office For National Statistics: Economic activity and social change in the UK, real-time indicators: 2
+2026-04-24 18:52:26,988 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+     stored  (score 6, cat=markets, freq=monthly)
+  -> Office For National Statistics: Economic activity and social change in the UK, real-time indicators: 2
+2026-04-24 18:52:30,110 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+     stored  (score 6, cat=markets, freq=monthly)
+  -> Hm Revenue Customs: Register to complete origin declarations under the UK-India Free Trade
+2026-04-24 18:52:34,304 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+     skipped (score 3 < 6)
+  -> Hm Revenue Customs: Restriction on Corporation Tax relief for interest deductions
+2026-04-24 18:52:38,775 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+     skipped (score 4 < 6)
+  -> Hm Revenue Customs: The Tax Agent's Handbook
+2026-04-24 18:52:43,011 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+     skipped (score 4 < 6)
+  -> Hm Revenue Customs: Pay Pillar 2 top-up taxes (Domestic Top-up Tax and Multinational Top-u
+2026-04-24 18:52:48,673 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+     skipped (score 2 < 6)
+  -> Hm Revenue Customs: Economic Crime Supervision Handbook
+2026-04-24 18:52:53,271 INFO httpx: HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+     skipped (score 4 < 6)
+
+Done. fetched=209 deduped=111 prefiltered=76 low-score=33 inserted=2.
+
+Daily scrape finished: Fri Apr 24 18:52:53 BST 2026

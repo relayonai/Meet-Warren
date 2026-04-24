@@ -29,6 +29,8 @@ from src.scraper import (
     title_passes_prefilter,
 )
 from src.summariser import summarise
+from src.compliance import scan_article
+from src.compliance.pipeline import init_compliance_tables
 
 logging.basicConfig(
     level=logging.INFO,
@@ -52,6 +54,7 @@ def scrape(force: bool, sources: str | None) -> None:
     cfg = load_config()
     conn = get_connection(cfg.db_path)
     init_db(conn)
+    init_compliance_tables(conn)
 
     selected = None
     if sources:
@@ -146,7 +149,7 @@ def scrape(force: bool, sources: str | None) -> None:
         return
 
     client = build_anthropic_client(cfg)
-    inserted = skipped_relevance = 0
+    inserted = skipped_relevance = compliance_warned = 0
 
     for art in prefiltered:
         click.echo(f"  -> {art.source}: {art.title[:70]}")
@@ -160,6 +163,15 @@ def scrape(force: bool, sources: str | None) -> None:
             skipped_relevance += 1
             continue
 
+        # Compliance scan (lightweight, hard rules only — never blocks storage)
+        scan_text = (summary.get("summary") or "") + "\n" + art.title
+        scan = scan_article(scan_text, article_id=art.id, title=art.title, conn=conn)
+        summary["compliance_grade"] = scan["grade"]
+        summary["compliance_notes"] = scan["notes"]
+        if scan["grade"] != "pass":
+            compliance_warned += 1
+            click.echo(f"     ⚠ compliance:{scan['grade']} ({scan['failed']} flag(s))")
+
         freq = _frequency_for(art.source)
         if insert_article(conn, art, summary, frequency=freq):
             inserted += 1
@@ -167,7 +179,8 @@ def scrape(force: bool, sources: str | None) -> None:
 
     click.echo(
         f"\nDone. fetched={len(raw)} deduped={len(new)} "
-        f"prefiltered={dropped_kw} low-score={skipped_relevance} inserted={inserted}."
+        f"prefiltered={dropped_kw} low-score={skipped_relevance} "
+        f"compliance-flagged={compliance_warned} inserted={inserted}."
     )
     if skipped_sources:
         click.echo(f"Skipped {len(skipped_sources)} source(s) not yet due: "
@@ -255,6 +268,46 @@ def generate(limit: int, category: str | None, since: str | None) -> None:
 
     for line in publish(html, text, subject, cfg):
         click.echo(line)
+
+
+@cli.command()
+@click.argument("file_path", type=click.Path(exists=True, dir_okay=False))
+@click.option("--kind", type=click.Choice(["newsletter", "blog", "article"]),
+              default="newsletter", help="Content kind for grading rules.")
+@click.option("--enforce/--no-enforce", default=False,
+              help="Run the auto-revision loop and write a -compliant.html alongside.")
+def compliance(file_path: str, kind: str, enforce: bool) -> None:
+    """Grade an HTML/text file against the compliance rulebook."""
+    from src.compliance import grade_content, analyze_findings, ensure_compliant
+    cfg = load_config()
+    content = open(file_path, "r", encoding="utf-8").read()
+    client = build_anthropic_client(cfg)
+
+    if enforce:
+        result = ensure_compliant(content, kind=kind, client=client,
+                                  model=cfg.anthropic_model, max_iterations=2)
+        out_path = file_path.rsplit(".", 1)[0] + "-compliant.html"
+        open(out_path, "w", encoding="utf-8").write(result["final_content"])
+        s = result["final_grade"]["summary"]
+        click.echo(f"Iterations: {result['iterations']} · Revised: {result['revised']}")
+        click.echo(f"Final grade: {s['grade']} ({s['passed']}/{s['total']} passed)")
+        click.echo(f"Wrote: {out_path}")
+        return
+
+    grading = grade_content(content, kind=kind, client=client, model=cfg.anthropic_model)
+    s = grading["summary"]
+    click.echo(f"Grade: {s['grade']} · {s['passed']}/{s['total']} passed "
+               f"({int(s['pass_rate']*100)}%)")
+    click.echo("\nFailures:")
+    for e in grading["expectations"]:
+        if not e["passed"]:
+            click.echo(f"  [{e['severity']}] §{e['section']}: {e['text']}")
+            click.echo(f"      {e['evidence'][:160]}")
+
+    analysis = analyze_findings(grading)
+    click.echo(f"\n{len(analysis['improvement_suggestions'])} suggestion(s):")
+    for sg in analysis["improvement_suggestions"][:10]:
+        click.echo(f"  [{sg['priority']}] {sg['suggestion'][:140]}")
 
 
 if __name__ == "__main__":

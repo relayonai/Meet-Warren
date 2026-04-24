@@ -14,6 +14,8 @@ import plotly.express as px
 from dash import Input, Output, State, ctx, dash_table, dcc, html, no_update
 
 from src.blog_generator import generate_blog_post, blog_to_html, blog_to_text
+from src.compliance import ensure_compliant, load_rulebook
+from src.compliance.pipeline import init_compliance_tables
 from src.config import build_anthropic_client, load_config
 from src.database import get_connection, init_db, query_articles
 from src.formatter import to_html, to_text
@@ -122,6 +124,12 @@ SIDEBAR = html.Div([
             active="exact",
             className="sidebar-link fw-semibold",
         ),
+        dbc.NavLink(
+            [html.Span("🛡️", className="me-2"), "Compliance"],
+            href="/compliance",
+            active="exact",
+            className="sidebar-link fw-semibold",
+        ),
     ], vertical=True, pills=True, className="px-3 pt-3"),
 ], style={
     "position": "fixed",
@@ -161,6 +169,8 @@ app.layout = html.Div([
 def route(pathname):
     if pathname == "/create":
         return _create_page()
+    if pathname == "/compliance":
+        return _compliance_page()
     return _database_page()
 
 
@@ -932,6 +942,12 @@ def generate_content(_, selected_rows, table_data, content_type):
         subject  = result.get("subject_line", "UK Personal Finance Digest")
         html_path = os.path.join(cfg.output_dir, f"newsletter-{stamp}.html")
         text_path = os.path.join(cfg.output_dir, f"newsletter-{stamp}.txt")
+        # Compliance enforcement loop
+        conn_c = get_connection(cfg.db_path)
+        compliance = ensure_compliant(out_html, kind="newsletter",
+                                      client=client, model=cfg.anthropic_model,
+                                      conn=conn_c, content_ref=os.path.basename(html_path))
+        out_html = compliance["final_content"]
         with open(html_path, "w") as f: f.write(out_html)
         with open(text_path, "w") as f: f.write(out_text)
         sections_list = []
@@ -944,7 +960,8 @@ def generate_content(_, selected_rows, table_data, content_type):
             dbc.ListGroupItem(f"📌 {s.get('heading','')} — {len(s.get('articles',[]))} article(s)")
             for s in result.get("sections", [])
         ]
-        return _content_preview("✉️ Newsletter Generated", subject, html_path, text_path, out_html, sections_list)
+        return _content_preview("✉️ Newsletter Generated", subject, html_path, text_path,
+                                 out_html, sections_list, compliance)
 
     if content_type == "blog":
         result = generate_blog_post(summaries, client, cfg.anthropic_model)
@@ -955,6 +972,12 @@ def generate_content(_, selected_rows, table_data, content_type):
         title    = result.get("title", "Blog Post")
         html_path = os.path.join(cfg.output_dir, f"blog-{stamp}.html")
         text_path = os.path.join(cfg.output_dir, f"blog-{stamp}.txt")
+        # Compliance enforcement loop
+        conn_c = get_connection(cfg.db_path)
+        compliance = ensure_compliant(out_html, kind="blog",
+                                      client=client, model=cfg.anthropic_model,
+                                      conn=conn_c, content_ref=os.path.basename(html_path))
+        out_html = compliance["final_content"]
         with open(html_path, "w") as f: f.write(out_html)
         with open(text_path, "w") as f: f.write(out_text)
         meta_list = []
@@ -976,13 +999,79 @@ def generate_content(_, selected_rows, table_data, content_type):
             meta_list.append(dbc.ListGroupItem(f"🔗 {len(result['sources_cited'])} sources cited"))
         if result.get("seo_tags"):
             meta_list.append(dbc.ListGroupItem("🏷️ " + " ".join(f"#{t}" for t in result["seo_tags"])))
-        return _content_preview("📝 Blog Post Generated", title, html_path, text_path, out_html, meta_list)
+        return _content_preview("📝 Blog Post Generated", title, html_path, text_path,
+                                 out_html, meta_list, compliance)
 
     return dbc.Alert("Unknown content type.", color="danger")
 
 
+def _compliance_card(compliance: dict) -> dbc.Card:
+    """Render a card summarising the compliance result for the generated piece."""
+    g       = (compliance or {}).get("final_grade", {}).get("summary", {})
+    grade   = g.get("grade", "?")
+    rate    = g.get("pass_rate", 0)
+    failed  = g.get("failed", 0)
+    total   = g.get("total", 0)
+    iters   = compliance.get("iterations", 0)
+    revised = compliance.get("revised", False)
+    color   = {"pass": "success", "warn": "warning", "fail": "danger"}.get(grade, "secondary")
+    icon    = {"pass": "✅", "warn": "⚠️", "fail": "❌"}.get(grade, "•")
+
+    audit_items = []
+    for entry in compliance.get("audit", []):
+        i = entry.get("iteration", 0)
+        g_i = entry.get("grade", "?")
+        ch = entry.get("changes", []) or []
+        if i == 0:
+            audit_items.append(html.Li(f"Initial grade: {g_i}", style={"color": "#5a6478"}))
+        else:
+            audit_items.append(html.Li([
+                html.Strong(f"Iteration {i} → {g_i}"),
+                html.Ul([html.Li(c, style={"fontSize": "12px"}) for c in ch[:8]],
+                        style={"marginTop": "4px", "marginBottom": "4px"}),
+            ]))
+
+    failures = [e for e in compliance.get("final_grade", {}).get("expectations", [])
+                if not e.get("passed")]
+    fail_items = [
+        html.Li([
+            html.Strong(f"§{e.get('section','?')} ", style={"color": "#c9a227"}),
+            e.get("text", ""),
+            html.Br(),
+            html.Small(e.get("evidence", "")[:160], className="text-muted"),
+        ], style={"marginBottom": "8px"})
+        for e in failures[:6]
+    ]
+
+    return dbc.Card(dbc.CardBody([
+        dbc.Row([
+            dbc.Col([
+                html.Span(icon, style={"fontSize": "1.5rem"}),
+                html.Span(" Compliance: ", className="ms-2"),
+                dbc.Badge(grade.upper(), color=color, className="ms-1"),
+                html.Span(f"  {int(rate*100)}% ({total - failed}/{total} checks passed)",
+                          className="text-muted ms-2", style={"fontSize": "0.9rem"}),
+            ], md=8),
+            dbc.Col([
+                dbc.Badge(f"Auto-revised x{iters}" if revised else "No revision needed",
+                          color="info" if revised else "light", className="float-end"),
+            ], md=4),
+        ], className="mb-2"),
+        dbc.Accordion([
+            dbc.AccordionItem([
+                html.H6("Audit trail", className="text-muted"),
+                html.Ol(audit_items, style={"fontSize": "13px"}),
+                html.H6("Outstanding issues", className="text-muted mt-3") if fail_items else None,
+                html.Ul(fail_items) if fail_items else html.Em("None — all checks passed.",
+                                                                className="text-success"),
+            ], title="View compliance details"),
+        ], start_collapsed=True, flush=True),
+    ]), className="shadow-sm mb-3", style={"borderLeft": f"4px solid var(--bs-{color})"})
+
+
 def _content_preview(badge_title: str, content_title: str, html_path: str,
-                     text_path: str, preview_html: str, meta_items: list) -> html.Div:
+                     text_path: str, preview_html: str, meta_items: list,
+                     compliance: dict | None = None) -> html.Div:
     return html.Div([
         dbc.Alert([
             html.Strong(f"✅ {badge_title}: {content_title}"),
@@ -994,6 +1083,7 @@ def _content_preview(badge_title: str, content_title: str, html_path: str,
                 html.Code(text_path, style={"fontSize": "0.78rem"}),
             ]),
         ], color="success", className="mb-3"),
+        _compliance_card(compliance) if compliance else html.Div(),
         dbc.Row([
             dbc.Col([
                 dbc.Card(dbc.CardBody([
@@ -1011,6 +1101,148 @@ def _content_preview(badge_title: str, content_title: str, html_path: str,
                 ]), className="shadow-sm"),
             ], md=9),
         ], className="g-3"),
+    ])
+
+
+# ===========================================================================
+# COMPLIANCE PAGE
+# ===========================================================================
+
+def _compliance_page():
+    rb = load_rulebook()
+
+    # ---- Recent compliance log -----------------------------------------------
+    log_rows = []
+    try:
+        conn = get_connection(cfg.db_path)
+        init_compliance_tables(conn)
+        rows = conn.execute(
+            "SELECT created_at, content_type, content_ref, grade, pass_rate, "
+            "failed_count, iterations, revised "
+            "FROM compliance_log ORDER BY id DESC LIMIT 50"
+        ).fetchall()
+        conn.close()
+        log_rows = [dict(r) for r in rows]
+    except Exception:
+        pass
+
+    # ---- Article compliance summary ------------------------------------------
+    article_stats = {"pass": 0, "warn": 0, "fail": 0, "ungraded": 0}
+    flagged_articles: list[dict] = []
+    try:
+        conn = get_connection(cfg.db_path)
+        init_db(conn)
+        rows = conn.execute(
+            "SELECT title, source, compliance_grade, compliance_notes, published_at, created_at "
+            "FROM articles ORDER BY COALESCE(published_at, created_at) DESC"
+        ).fetchall()
+        conn.close()
+        for r in rows:
+            g = r["compliance_grade"] or "ungraded"
+            article_stats[g] = article_stats.get(g, 0) + 1
+            if g in ("warn", "fail"):
+                try:
+                    notes = json.loads(r["compliance_notes"] or "[]")
+                except Exception:
+                    notes = []
+                flagged_articles.append({
+                    "title":  r["title"],
+                    "source": r["source"],
+                    "grade":  g,
+                    "notes":  notes,
+                    "date":   (r["published_at"] or r["created_at"] or "")[:10],
+                })
+    except Exception:
+        pass
+
+    # ---- UI ------------------------------------------------------------------
+    summary_cards = dbc.Row([
+        dbc.Col(_stat_card("Hard Rules",     str(len(rb.hard_rules)),         "primary"),  md=3),
+        dbc.Col(_stat_card("Principles",     str(len(rb.principles)),          "info"),     md=3),
+        dbc.Col(_stat_card("Articles Pass",  str(article_stats.get("pass", 0)),"success"), md=3),
+        dbc.Col(_stat_card("Articles Flagged",
+                           str(article_stats.get("warn", 0) + article_stats.get("fail", 0)),
+                           "warning"), md=3),
+    ], className="g-3 mb-4")
+
+    log_table = dbc.Table([
+        html.Thead(html.Tr([html.Th(h) for h in
+            ["When", "Type", "Reference", "Grade", "Pass Rate", "Failed", "Iters", "Revised"]])),
+        html.Tbody([
+            html.Tr([
+                html.Td(r["created_at"][:19].replace("T", " ")),
+                html.Td(dbc.Badge(r["content_type"], color="secondary")),
+                html.Td(html.Code(r["content_ref"] or "—", style={"fontSize": "0.78rem"})),
+                html.Td(dbc.Badge(r["grade"].upper(),
+                                  color={"pass": "success", "warn": "warning",
+                                         "fail": "danger"}.get(r["grade"], "secondary"))),
+                html.Td(f"{int((r['pass_rate'] or 0)*100)}%"),
+                html.Td(str(r["failed_count"] or 0)),
+                html.Td(str(r["iterations"] or 0)),
+                html.Td("Yes" if r["revised"] else "No"),
+            ]) for r in log_rows
+        ]) if log_rows else html.Tbody(html.Tr(html.Td("No compliance runs yet.",
+                                       colSpan=8, className="text-muted text-center p-3")))
+    ], hover=True, size="sm", className="mb-3")
+
+    flagged_table = dbc.Table([
+        html.Thead(html.Tr([html.Th(h) for h in ["Article", "Source", "Date", "Grade", "Issues"]])),
+        html.Tbody([
+            html.Tr([
+                html.Td(a["title"][:80]),
+                html.Td(a["source"], className="text-muted small"),
+                html.Td(a["date"], className="text-muted small"),
+                html.Td(dbc.Badge(a["grade"].upper(),
+                                  color={"warn": "warning", "fail": "danger"}.get(a["grade"], "secondary"))),
+                html.Td(html.Ul([html.Li(n, style={"fontSize": "12px"}) for n in (a["notes"] or [])[:3]],
+                                style={"marginBottom": 0, "paddingLeft": "16px"})),
+            ]) for a in flagged_articles[:30]
+        ]) if flagged_articles else html.Tbody(html.Tr(html.Td("No flagged articles.",
+                                       colSpan=5, className="text-muted text-center p-3")))
+    ], hover=True, size="sm")
+
+    rules_html = dbc.Accordion([
+        dbc.AccordionItem([
+            html.H6("Banned phrases", className="text-muted mt-2"),
+            html.Ul([html.Li([html.Code(r.pattern), f"  — §{r.section}: {r.rationale}"])
+                     for r in rb.hard_rules if r.kind == "banned_phrase"]),
+            html.H6("Banned terms", className="text-muted mt-3"),
+            html.Ul([html.Li([html.Code(r.pattern), f"  — §{r.section}: {r.rationale}"])
+                     for r in rb.hard_rules if r.kind == "banned_term"]),
+            html.H6("Banned topics", className="text-muted mt-3"),
+            html.Ul([html.Li([html.Code(r.pattern), f"  — §{r.section}: {r.rationale}"])
+                     for r in rb.hard_rules if r.kind == "banned_topic"]),
+        ], title=f"Hard Rules ({len(rb.hard_rules)})"),
+        dbc.AccordionItem([
+            html.Ul([html.Li([html.Strong(p.title), f"  (§{p.section})", html.Br(),
+                              html.Small(p.description, className="text-muted")])
+                     for p in rb.principles]),
+        ], title=f"Principles ({len(rb.principles)})"),
+        dbc.AccordionItem([
+            html.Ul([html.Li(html.Code(d), style={"marginBottom": "8px"})
+                     for d in rb.canonical_disclaimers]),
+        ], title=f"Canonical Disclaimers ({len(rb.canonical_disclaimers)})"),
+    ], start_collapsed=True, flush=False, className="mb-4")
+
+    return html.Div([
+        html.H3("Compliance", className="fw-bold mb-1"),
+        html.P([
+            "Loaded from ", html.Code(rb.source_path),
+            " · cached at ", html.Code("data/compliance_rules.json"),
+        ], className="text-muted mb-4"),
+        summary_cards,
+        dbc.Card(dbc.CardBody([
+            html.H5("Marketing Compliance Rulebook", className="fw-bold text-primary mb-3"),
+            rules_html,
+        ]), className="shadow-sm mb-4"),
+        dbc.Card(dbc.CardBody([
+            html.H5("Recent Compliance Runs", className="fw-bold text-primary mb-3"),
+            log_table,
+        ]), className="shadow-sm mb-4"),
+        dbc.Card(dbc.CardBody([
+            html.H5("Flagged Articles", className="fw-bold text-primary mb-3"),
+            flagged_table,
+        ]), className="shadow-sm mb-4"),
     ])
 
 
