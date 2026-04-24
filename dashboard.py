@@ -663,10 +663,22 @@ def _create_page():
                                  placeholder="All categories", multi=True, clearable=True),
                 ], md=3),
                 dbc.Col([
-                    dbc.Label("Frequency"),
-                    dcc.Dropdown(id="cr-frequency",
-                                 options=[{"label": f.title(), "value": f} for f in FREQUENCIES],
-                                 placeholder="All frequencies", multi=True, clearable=True),
+                    dbc.Label([
+                        "Time Frame ",
+                        html.Sup("ⓘ", id="cr-timeframe-info",
+                                 style={"fontSize": "0.7em", "opacity": "0.6", "cursor": "help"}),
+                    ]),
+                    dcc.Dropdown(id="cr-timeframe",
+                                 options=[
+                                     {"label": "Last 24 hours (Daily)",  "value": "daily"},
+                                     {"label": "Last 7 days (Weekly)",   "value": "weekly"},
+                                     {"label": "Last 30 days (Monthly)", "value": "monthly"},
+                                     {"label": "All time",               "value": "all"},
+                                 ],
+                                 value="weekly", clearable=False),
+                    dbc.Tooltip("Restricts the candidate pool to articles published within this window. "
+                                "Pick 'Weekly' for a weekly newsletter so two-week-old stories are excluded.",
+                                target="cr-timeframe-info", placement="top"),
                 ], md=3),
                 dbc.Col([
                     dbc.Label("Min Score"),
@@ -778,14 +790,17 @@ def _create_page():
 
 # --- Create page callbacks --------------------------------------------------
 
+_TIMEFRAME_DAYS = {"daily": 1, "weekly": 7, "monthly": 30}
+
+
 @app.callback(
     Output("cr-table", "data"),
     Input("cr-source",    "value"),
     Input("cr-category",  "value"),
-    Input("cr-frequency", "value"),
+    Input("cr-timeframe", "value"),
     Input("cr-score",     "value"),
 )
-def update_create_table(sources, cats, freqs, min_score):
+def update_create_table(sources, cats, timeframe, min_score):
     df = _get_df()
     if df.empty:
         return []
@@ -793,8 +808,10 @@ def update_create_table(sources, cats, freqs, min_score):
         df = df[df["source"].isin(sources)]
     if cats:
         df = df[df["category"].isin(cats)]
-    if freqs:
-        df = df[df["scrape_frequency"].isin(freqs)]
+    if timeframe and timeframe != "all":
+        from datetime import datetime, timedelta
+        cutoff = (datetime.utcnow() - timedelta(days=_TIMEFRAME_DAYS[timeframe])).strftime("%Y-%m-%d")
+        df = df[df["published_at"] >= cutoff]
     if min_score:
         df = df[df["relevance_score"] >= min_score]
     display = df.copy()
