@@ -888,13 +888,31 @@ def generate_content(_, selected_rows, table_data, content_type):
     if not selected_rows or not table_data or not content_type:
         return dbc.Alert("Nothing to generate — check your selections.", color="warning")
 
-    # Gather titles of selected rows, look up full records from DB
+    # Gather titles of selected rows, look up full records from DB (incl. raw_content)
     selected_titles = [table_data[i]["title"] for i in selected_rows]
     df = _get_df()
     rows_df = df[df["title"].isin(selected_titles)]
+    if rows_df.empty:
+        return dbc.Alert("Could not load article data.", color="danger")
+
+    # Fetch raw_content excerpts so the editor isn't summarising summaries.
+    try:
+        conn_raw = get_connection(cfg.db_path)
+        ids = [r["id"] for _, r in rows_df.iterrows()]
+        placeholders = ",".join("?" * len(ids))
+        raw_rows = conn_raw.execute(
+            f"SELECT id, raw_content FROM articles WHERE id IN ({placeholders})", ids
+        ).fetchall()
+        conn_raw.close()
+        raw_by_id = {r["id"]: (r["raw_content"] or "") for r in raw_rows}
+    except Exception:
+        raw_by_id = {}
 
     summaries = []
     for _, row in rows_df.iterrows():
+        excerpt = (raw_by_id.get(row["id"], "") or "").strip()
+        if len(excerpt) > 1200:
+            excerpt = excerpt[:1200].rsplit(" ", 1)[0] + "…"
         summaries.append({
             "title":           row["title"],
             "url":             row["url"],
@@ -904,14 +922,21 @@ def generate_content(_, selected_rows, table_data, content_type):
             "key_points":      row["key_points"] if "key_points" in row else [],
             "category":        row["category"],
             "relevance_score": row["relevance_score"],
+            "excerpt":         excerpt,
         })
-
-    if not summaries:
-        return dbc.Alert("Could not load article data.", color="danger")
 
     client = build_anthropic_client(cfg)
     os.makedirs(cfg.output_dir, exist_ok=True)
-    stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    today_str = datetime.utcnow().strftime("%Y-%m-%d")
+
+    def _versioned(prefix: str) -> str:
+        """Return e.g. 'newsletter-2026-04-25-v3' picking next free version for today."""
+        n = 1
+        while True:
+            base = f"{prefix}-{today_str}-v{n}"
+            if not os.path.exists(os.path.join(cfg.output_dir, f"{base}.html")):
+                return base
+            n += 1
 
     if content_type == "newsletter":
         result = generate_newsletter(summaries, client, cfg.anthropic_model)
@@ -920,8 +945,10 @@ def generate_content(_, selected_rows, table_data, content_type):
         out_html = to_html(result)
         out_text = to_text(result)
         subject  = result.get("subject_line", "UK Personal Finance Digest")
-        html_path = os.path.join(cfg.output_dir, f"newsletter-{stamp}.html")
-        text_path = os.path.join(cfg.output_dir, f"newsletter-{stamp}.txt")
+        base = _versioned("newsletter")
+        html_path = os.path.join(cfg.output_dir, f"{base}.html")
+        text_path = os.path.join(cfg.output_dir, f"{base}.txt")
+        json_path = os.path.join(cfg.output_dir, f"{base}.json")
         # Compliance enforcement loop
         conn_c = get_connection(cfg.db_path)
         compliance = ensure_compliant(out_html, kind="newsletter",
@@ -930,6 +957,15 @@ def generate_content(_, selected_rows, table_data, content_type):
         out_html = compliance["final_content"]
         with open(html_path, "w") as f: f.write(out_html)
         with open(text_path, "w") as f: f.write(out_text)
+        with open(json_path, "w") as f:
+            json.dump({
+                "kind": "newsletter",
+                "generated_at_utc": datetime.utcnow().isoformat(),
+                "subject": subject,
+                "input_articles": summaries,
+                "result": result,
+                "compliance_summary": (compliance or {}).get("final_grade", {}).get("summary", {}),
+            }, f, indent=2, ensure_ascii=False, default=str)
         sections_list = []
         if result.get("edition_label"):
             sections_list.append(dbc.ListGroupItem(f"🗓️ {result['edition_label']}"))
@@ -941,7 +977,7 @@ def generate_content(_, selected_rows, table_data, content_type):
             for s in result.get("sections", [])
         ]
         return _content_preview("✉️ Newsletter Generated", subject, html_path, text_path,
-                                 out_html, sections_list, compliance)
+                                 out_html, sections_list, compliance, json_path=json_path)
 
     if content_type == "blog":
         result = generate_blog_post(summaries, client, cfg.anthropic_model)
@@ -950,8 +986,10 @@ def generate_content(_, selected_rows, table_data, content_type):
         out_html = blog_to_html(result)
         out_text = blog_to_text(result)
         title    = result.get("title", "Blog Post")
-        html_path = os.path.join(cfg.output_dir, f"blog-{stamp}.html")
-        text_path = os.path.join(cfg.output_dir, f"blog-{stamp}.txt")
+        base = _versioned("blog")
+        html_path = os.path.join(cfg.output_dir, f"{base}.html")
+        text_path = os.path.join(cfg.output_dir, f"{base}.txt")
+        json_path = os.path.join(cfg.output_dir, f"{base}.json")
         # Compliance enforcement loop
         conn_c = get_connection(cfg.db_path)
         compliance = ensure_compliant(out_html, kind="blog",
@@ -960,6 +998,15 @@ def generate_content(_, selected_rows, table_data, content_type):
         out_html = compliance["final_content"]
         with open(html_path, "w") as f: f.write(out_html)
         with open(text_path, "w") as f: f.write(out_text)
+        with open(json_path, "w") as f:
+            json.dump({
+                "kind": "blog",
+                "generated_at_utc": datetime.utcnow().isoformat(),
+                "title": title,
+                "input_articles": summaries,
+                "result": result,
+                "compliance_summary": (compliance or {}).get("final_grade", {}).get("summary", {}),
+            }, f, indent=2, ensure_ascii=False, default=str)
         meta_list = []
         rt = result.get("reading_time_minutes")
         if rt:
@@ -980,7 +1027,7 @@ def generate_content(_, selected_rows, table_data, content_type):
         if result.get("seo_tags"):
             meta_list.append(dbc.ListGroupItem("🏷️ " + " ".join(f"#{t}" for t in result["seo_tags"])))
         return _content_preview("📝 Blog Post Generated", title, html_path, text_path,
-                                 out_html, meta_list, compliance)
+                                 out_html, meta_list, compliance, json_path=json_path)
 
     return dbc.Alert("Unknown content type.", color="danger")
 
@@ -997,30 +1044,62 @@ def _compliance_card(compliance: dict) -> dbc.Card:
     color   = {"pass": "success", "warn": "warning", "fail": "danger"}.get(grade, "secondary")
     icon    = {"pass": "✅", "warn": "⚠️", "fail": "❌"}.get(grade, "•")
 
+    # Per-change rendering with §section pill extracted from the change string.
+    import re as _re
+    _SECTION_RE = _re.compile(r"§\s*([0-9]+(?:\.[0-9]+)*)")
+
+    def _render_change(c: str) -> html.Span:
+        m = _SECTION_RE.search(c or "")
+        if m:
+            sec = m.group(1)
+            txt = _SECTION_RE.sub("", c).replace("()", "").strip(" .")
+            return html.Span([
+                dbc.Badge(f"§{sec}", color="warning", className="me-2",
+                          style={"fontSize": "0.7rem"}),
+                txt,
+            ])
+        return html.Span(c)
+
+    grade_color = {"pass": "success", "warn": "warning", "fail": "danger"}
     audit_items = []
-    for entry in compliance.get("audit", []):
+    for entry in compliance.get("audit", []) or []:
         i = entry.get("iteration", 0)
         g_i = entry.get("grade", "?")
         ch = entry.get("changes", []) or []
         if i == 0:
-            audit_items.append(html.Li(f"Initial grade: {g_i}", style={"color": "#5a6478"}))
+            audit_items.append(html.Li([
+                html.Span("Initial grade: ", className="text-muted"),
+                dbc.Badge(g_i.upper(), color=grade_color.get(g_i, "secondary"),
+                          className="ms-1"),
+            ], style={"marginBottom": "8px"}))
         else:
             audit_items.append(html.Li([
-                html.Strong(f"Iteration {i} → {g_i}"),
-                html.Ul([html.Li(c, style={"fontSize": "12px"}) for c in ch[:8]],
-                        style={"marginTop": "4px", "marginBottom": "4px"}),
-            ]))
+                html.Div([
+                    html.Strong(f"Iteration {i} → "),
+                    dbc.Badge(g_i.upper(), color=grade_color.get(g_i, "secondary"),
+                              className="ms-1"),
+                    html.Span(f"  ·  {len(ch)} change(s) applied",
+                              className="text-muted ms-2", style={"fontSize": "0.85rem"}),
+                ], className="mb-2"),
+                html.Ul(
+                    [html.Li(_render_change(c), style={"fontSize": "13px",
+                                                       "marginBottom": "4px"})
+                     for c in ch[:12]],
+                    style={"marginTop": "4px", "marginBottom": "4px"},
+                ),
+            ], style={"marginBottom": "10px"}))
 
     failures = [e for e in compliance.get("final_grade", {}).get("expectations", [])
                 if not e.get("passed")]
     fail_items = [
         html.Li([
-            html.Strong(f"§{e.get('section','?')} ", style={"color": "#c9a227"}),
-            e.get("text", ""),
+            dbc.Badge(f"§{e.get('section','?')}", color="warning",
+                      className="me-2", style={"fontSize": "0.7rem"}),
+            html.Strong(e.get("text", "")),
             html.Br(),
             html.Small(e.get("evidence", "")[:160], className="text-muted"),
-        ], style={"marginBottom": "8px"})
-        for e in failures[:6]
+        ], style={"marginBottom": "10px"})
+        for e in failures[:8]
     ]
 
     return dbc.Card(dbc.CardBody([
@@ -1051,17 +1130,22 @@ def _compliance_card(compliance: dict) -> dbc.Card:
 
 def _content_preview(badge_title: str, content_title: str, html_path: str,
                      text_path: str, preview_html: str, meta_items: list,
-                     compliance: dict | None = None) -> html.Div:
+                     compliance: dict | None = None,
+                     json_path: str | None = None) -> html.Div:
+    saved_paths = [
+        "Saved to ",
+        html.Code(html_path, style={"fontSize": "0.78rem"}),
+        " · ",
+        html.Code(text_path, style={"fontSize": "0.78rem"}),
+    ]
+    if json_path:
+        saved_paths += [" · ", html.Code(json_path, style={"fontSize": "0.78rem"})]
+
     return html.Div([
         dbc.Alert([
             html.Strong(f"✅ {badge_title}: {content_title}"),
             html.Br(),
-            html.Small([
-                "Saved to ",
-                html.Code(html_path, style={"fontSize": "0.78rem"}),
-                " and ",
-                html.Code(text_path, style={"fontSize": "0.78rem"}),
-            ]),
+            html.Small(saved_paths),
         ], color="success", className="mb-3"),
         _compliance_card(compliance) if compliance else html.Div(),
         dbc.Row([
@@ -1073,15 +1157,61 @@ def _content_preview(badge_title: str, content_title: str, html_path: str,
             ], md=3),
             dbc.Col([
                 dbc.Card(dbc.CardBody([
-                    html.H6("Preview", className="text-muted mb-2"),
-                    html.Iframe(
-                        srcDoc=preview_html,
-                        style={"width": "100%", "height": "720px", "border": "none", "borderRadius": "4px"},
+                    dbc.Row([
+                        dbc.Col(html.H6("Preview", className="text-muted mb-0 mt-1"), md=6),
+                        dbc.Col([
+                            dbc.ButtonGroup([
+                                dbc.Button("📱 Mobile",  id="preview-mobile",  color="light",
+                                           size="sm", outline=True, n_clicks=0),
+                                dbc.Button("💻 Tablet",  id="preview-tablet",  color="light",
+                                           size="sm", outline=True, n_clicks=0),
+                                dbc.Button("🖥 Desktop", id="preview-desktop", color="primary",
+                                           size="sm", n_clicks=0),
+                            ], size="sm"),
+                        ], md=6, className="text-end"),
+                    ], className="mb-2"),
+                    html.Div(
+                        html.Iframe(
+                            id="preview-frame",
+                            srcDoc=preview_html,
+                            style={"width": "100%", "height": "780px",
+                                   "border": "1px solid #e6e9ef", "borderRadius": "6px",
+                                   "background": "#ffffff"},
+                        ),
+                        id="preview-frame-wrap",
+                        style={"width": "100%", "transition": "width 0.2s ease",
+                               "margin": "0 auto"},
                     ),
                 ]), className="shadow-sm"),
             ], md=9),
         ], className="g-3"),
     ])
+
+
+@app.callback(
+    Output("preview-frame-wrap", "style"),
+    Output("preview-mobile",  "color"),
+    Output("preview-mobile",  "outline"),
+    Output("preview-tablet",  "color"),
+    Output("preview-tablet",  "outline"),
+    Output("preview-desktop", "color"),
+    Output("preview-desktop", "outline"),
+    Input("preview-mobile",  "n_clicks"),
+    Input("preview-tablet",  "n_clicks"),
+    Input("preview-desktop", "n_clicks"),
+    prevent_initial_call=True,
+)
+def _toggle_preview_width(_m, _t, _d):
+    trig = ctx.triggered_id
+    base = {"transition": "width 0.2s ease", "margin": "0 auto"}
+    if trig == "preview-mobile":
+        return ({**base, "width": "390px"},
+                "primary", False, "light", True, "light", True)
+    if trig == "preview-tablet":
+        return ({**base, "width": "768px"},
+                "light", True, "primary", False, "light", True)
+    return ({**base, "width": "100%"},
+            "light", True, "light", True, "primary", False)
 
 
 # ===========================================================================

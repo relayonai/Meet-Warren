@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+import re
+from collections import Counter
+from datetime import datetime, timezone
 from html import escape
 from typing import List, Optional
 
@@ -12,6 +14,37 @@ from ._json import parse_json_response
 
 log = logging.getLogger(__name__)
 
+
+def _diversity_warning_blog(articles: List[dict]) -> Optional[str]:
+    if not articles:
+        return None
+    counts = Counter((a.get("source") or "Unknown") for a in articles)
+    top, n = counts.most_common(1)[0]
+    if n / max(len(articles), 1) > 0.5 and len(articles) >= 4:
+        return (
+            f"Source balance: {n}/{len(articles)} of the candidate articles come from "
+            f"{top}. Treat that outlet as ONE perspective and explicitly attribute "
+            f"each fact to its source so the analysis isn't a paraphrase of one outlet."
+        )
+    return None
+
+
+def _word_count(post: dict) -> int:
+    chunks = [post.get("intro", ""), post.get("conclusion", "")]
+    chunks += [s.get("content", "") for s in post.get("sections", []) or []]
+    chunks += [s.get("pull_quote", "") for s in post.get("sections", []) or []]
+    chunks += [t for t in (post.get("key_takeaways") or [])]
+    chunks += [(f.get("question", "") + " " + f.get("answer", ""))
+               for f in (post.get("faqs") or [])]
+    text = " ".join(c for c in chunks if c)
+    return len(re.findall(r"\w+", text))
+
+
+def _compute_reading_time(post: dict) -> int:
+    """Reading time at 220 wpm, clamped to [3, 25] minutes."""
+    wc = _word_count(post)
+    return max(3, min(25, round(wc / 220)))
+
 SYSTEM_PROMPT = (
     "You are a senior UK personal-finance journalist with 15 years at outlets like the FT and MoneyWeek. "
     "You synthesise — never paraphrase — and your analysis carries practical implications "
@@ -19,14 +52,23 @@ SYSTEM_PROMPT = (
     "You return ONLY valid JSON. No markdown fences, no prose outside the JSON object."
 )
 
-USER_TEMPLATE = """Write a long-form UK personal-finance blog post synthesising the article summaries below.
+USER_TEMPLATE = """Write a long-form UK personal-finance blog post synthesising the article records below.
+
+Each input article carries: title, url, source, published_at, category, relevance_score,
+a `summary`, `key_points` (3-5 bullets), and an `excerpt` (raw text from the original).
+USE the key_points and excerpt — synthesise across them, do not paraphrase a single
+summary. Attribute facts to their original source.
+
+{diversity_note}
+Today's publication date is: {today_human}.
 
 Return a JSON object that EXACTLY matches this schema (do not add or omit keys):
 {{
   "title":    "string (compelling SEO-friendly headline, <= 90 chars)",
   "subtitle": "string (supporting deck / dek, <= 160 chars)",
+  "meta_description": "string (140-160 chars, used for <meta name=description> and OpenGraph)",
   "byline":   "string (e.g. 'By the Warren Editorial Desk')",
-  "reading_time_minutes": integer (estimate based on body length, 4-12),
+  "reading_time_minutes": integer (will be overwritten server-side from word count — give your best guess),
   "key_takeaways": ["string", "..."]   // 3-5 punchy bullets the reader gets in 30 seconds
   ,
   "intro":    "string (2-3 paragraphs setting context, separated by \\n\\n)",
@@ -57,7 +99,7 @@ Requirements:
 - seo_tags: 5-8 lowercase tags relevant to UK personal finance.
 - Do NOT copy sentences verbatim from the inputs — synthesise and analyse.
 
-Article summaries (JSON):
+Article records (JSON):
 {articles_json}
 """
 
@@ -70,8 +112,15 @@ def generate_blog_post(
     if not article_summaries:
         return None
 
+    today = datetime.now(timezone.utc)
+    today_human = today.strftime("%a %d %B %Y")
+    div = _diversity_warning_blog(article_summaries) or ""
+    diversity_note = f"⚠ {div}\n" if div else ""
+
     prompt = USER_TEMPLATE.format(
-        articles_json=json.dumps(article_summaries, ensure_ascii=False, indent=2)
+        articles_json=json.dumps(article_summaries, ensure_ascii=False, indent=2),
+        today_human=today_human,
+        diversity_note=diversity_note,
     )
     try:
         resp = client.messages.create(
@@ -92,10 +141,16 @@ def generate_blog_post(
             return None
     # backfill new fields softly so older callers / partial outputs still render
     data.setdefault("byline", "By the Warren Editorial Desk")
-    data.setdefault("reading_time_minutes", max(4, min(12, len(data.get("sections", [])) * 2 + 3)))
     data.setdefault("key_takeaways", [])
     data.setdefault("faqs", [])
     data.setdefault("sources_cited", [])
+    data.setdefault("meta_description", (data.get("subtitle") or "")[:160])
+
+    # --- Server-side post-processing -----------------------------------------
+    data["reading_time_minutes"] = _compute_reading_time(data)
+    data["published_iso"] = today.date().isoformat()
+    data["published_human"] = today_human
+    data["_diversity_warning"] = _diversity_warning_blog(article_summaries)
     return data
 
 
@@ -234,69 +289,180 @@ def _tags_html(tags: list) -> str:
     return f'<div style="margin-top:8px;">{pills}</div>'
 
 
+def _tldr_html(takeaways: list) -> str:
+    """A speakable TL;DR shown above the body — paired with schema.org Speakable."""
+    if not takeaways:
+        return ""
+    items = "".join(f"<li>{escape(t)}</li>" for t in takeaways[:3])
+    return (
+        f'<aside class="tldr" aria-label="TL;DR" itemscope '
+        f'itemtype="https://schema.org/SpeakableSpecification" '
+        f'style="margin:18px 0 0 0;padding:14px 18px;background:{NAVY};color:#ffffff;'
+        f'border-radius:8px;">'
+        f'<div style="font-size:11px;font-weight:700;letter-spacing:0.14em;'
+        f'text-transform:uppercase;color:{ACCENT};margin-bottom:6px;">TL;DR</div>'
+        f'<ul style="margin:0;padding-left:18px;font-size:14px;line-height:1.55;">{items}</ul>'
+        f'</aside>'
+    )
+
+
+def _seo_head(post: dict) -> str:
+    """Open Graph + Twitter Card + JSON-LD Article + canonical + meta description."""
+    title       = (post.get("title") or "").strip()
+    description = (post.get("meta_description") or post.get("subtitle") or "").strip()[:300]
+    url         = (post.get("canonical_url") or "").strip()
+    published   = (post.get("published_iso") or datetime.now(timezone.utc).date().isoformat())
+    byline      = (post.get("byline") or "By the Warren Editorial Desk").strip()
+    tags        = post.get("seo_tags") or []
+
+    canonical = f'<link rel="canonical" href="{escape(url)}">' if url else ""
+
+    og = f"""
+  <meta property="og:type" content="article">
+  <meta property="og:title" content="{escape(title)}">
+  <meta property="og:description" content="{escape(description)}">
+  <meta property="og:site_name" content="Warren · UK Personal Finance">
+  {f'<meta property="og:url" content="{escape(url)}">' if url else ""}
+  <meta property="article:published_time" content="{escape(published)}">
+  <meta property="article:author" content="{escape(byline)}">"""
+    for t in tags[:8]:
+        og += f'\n  <meta property="article:tag" content="{escape(t)}">'
+
+    twitter = f"""
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="{escape(title)}">
+  <meta name="twitter:description" content="{escape(description)}">"""
+
+    article_ld = {
+        "@context": "https://schema.org",
+        "@type": "NewsArticle",
+        "headline": title,
+        "description": description,
+        "datePublished": published,
+        "dateModified": published,
+        "author": [{"@type": "Organization", "name": "Warren Editorial Desk"}],
+        "publisher": {
+            "@type": "Organization",
+            "name": "Warren",
+            "url": "https://meetwarren.co.uk",
+        },
+        "mainEntityOfPage": url or "",
+        "keywords": ", ".join(tags),
+        "speakable": {
+            "@type": "SpeakableSpecification",
+            "cssSelector": [".tldr", "h1"],
+        },
+    }
+
+    faq_ld = ""
+    if post.get("faqs"):
+        faq_obj = {
+            "@context": "https://schema.org",
+            "@type": "FAQPage",
+            "mainEntity": [
+                {
+                    "@type": "Question",
+                    "name": f.get("question", ""),
+                    "acceptedAnswer": {"@type": "Answer", "text": f.get("answer", "")},
+                }
+                for f in post["faqs"]
+            ],
+        }
+        faq_ld = f'\n  <script type="application/ld+json">{json.dumps(faq_obj, ensure_ascii=False)}</script>'
+
+    return f"""
+  <meta name="description" content="{escape(description)}">
+  {canonical}{og}{twitter}
+  <script type="application/ld+json">{json.dumps(article_ld, ensure_ascii=False)}</script>{faq_ld}"""
+
+
 def blog_to_html(post: dict) -> str:
     title    = escape(post.get("title", "") or "")
     subtitle = escape(post.get("subtitle", "") or "")
     byline   = escape(post.get("byline", "By the Warren Editorial Desk") or "")
     rt       = int(post.get("reading_time_minutes", 6) or 6)
-    today    = datetime.utcnow().strftime("%-d %B %Y") if hasattr(datetime, "strftime") else ""
+    published_iso   = post.get("published_iso") or datetime.now(timezone.utc).date().isoformat()
+    today           = post.get("published_human") or datetime.now(timezone.utc).strftime("%d %B %Y").lstrip("0")
 
     intro_paras      = _paras(post.get("intro", "") or "")
     conclusion_paras = _paras(post.get("conclusion", "") or "")
     sections_html    = "".join(_section_html(s, i) for i, s in enumerate(post.get("sections", [])))
     toc              = _toc_html(post.get("sections", []))
+    tldr             = _tldr_html(post.get("key_takeaways", []))
     takeaways        = _takeaways_html(post.get("key_takeaways", []))
     faqs             = _faqs_html(post.get("faqs", []))
     sources          = _sources_html(post.get("sources_cited", []))
     tags             = _tags_html(post.get("seo_tags", []))
+    seo_head         = _seo_head(post)
 
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>{title}</title>
+  <meta name="color-scheme" content="light dark">
+  <title>{title}</title>{seo_head}
+  <style>
+    @media (prefers-color-scheme: dark) {{
+      body {{ background:#0f1419 !important; color:#e6e9ef !important; }}
+      header, main, footer {{ background:#1a1f2a !important; border-color:#2a3140 !important; }}
+      h1, h2 {{ color:#f1d785 !important; }}
+      blockquote {{ background:#2a2415 !important; color:#f1d785 !important; }}
+      a {{ color:#9bbcec !important; }}
+      .meta-row {{ color:#8892a3 !important; border-color:#2a3140 !important; }}
+    }}
+    @media print {{
+      header, footer, nav {{ display:none !important; }}
+      main {{ max-width:100% !important; padding:0 !important; }}
+      a {{ color:inherit !important; text-decoration:none !important; }}
+    }}
+  </style>
 </head>
 <body style="margin:0;padding:0;background:{SOFT_BG};font-family:{FONT_BODY};color:{INK};">
 
-  <header style="background:#ffffff;border-bottom:1px solid {BORDER};padding:18px 24px;">
+  <header role="banner" style="background:#ffffff;border-bottom:1px solid {BORDER};padding:18px 24px;">
     <div style="max-width:780px;margin:0 auto;display:flex;justify-content:space-between;align-items:center;">
       <div>
         <div style="font-size:20px;font-weight:800;color:{NAVY};letter-spacing:-0.01em;">Warren</div>
         <div style="font-size:11px;color:{MUTED};letter-spacing:0.1em;text-transform:uppercase;font-weight:600;">UK Personal Finance</div>
       </div>
-      <div style="font-size:12px;color:{MUTED};">{today}</div>
+      <time datetime="{escape(published_iso)}" style="font-size:12px;color:{MUTED};">{escape(today)}</time>
     </div>
   </header>
 
-  <main style="max-width:780px;margin:0 auto;padding:48px 24px 24px 24px;background:#ffffff;">
+  <main role="main" style="max-width:780px;margin:0 auto;padding:48px 24px 24px 24px;background:#ffffff;">
+    <article itemscope itemtype="https://schema.org/NewsArticle">
+      <meta itemprop="datePublished" content="{escape(published_iso)}">
 
-    <div style="font-size:11px;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:{ACCENT};margin-bottom:14px;">Analysis · UK Personal Finance</div>
-    <h1 style="font-family:{FONT_DISPLAY};font-size:40px;line-height:1.15;color:{NAVY};margin:0 0 16px 0;letter-spacing:-0.02em;">{title}</h1>
-    <p style="font-family:{FONT_BODY};font-size:19px;line-height:1.5;color:{MUTED};margin:0 0 20px 0;">{subtitle}</p>
-    <div style="display:flex;align-items:center;gap:14px;font-size:13px;color:{MUTED};padding:14px 0;border-top:1px solid {BORDER};border-bottom:1px solid {BORDER};margin-bottom:32px;">
-      <span style="font-weight:600;color:{INK};">{byline}</span>
-      <span>·</span>
-      <span>{rt} min read</span>
-    </div>
+      <div style="font-size:11px;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:{ACCENT};margin-bottom:14px;">Analysis · UK Personal Finance</div>
+      <h1 itemprop="headline" style="font-family:{FONT_DISPLAY};font-size:40px;line-height:1.15;color:{NAVY};margin:0 0 16px 0;letter-spacing:-0.02em;">{title}</h1>
+      <p itemprop="description" style="font-family:{FONT_BODY};font-size:19px;line-height:1.5;color:{MUTED};margin:0 0 20px 0;">{subtitle}</p>
+      <div class="meta-row" style="display:flex;align-items:center;gap:14px;font-size:13px;color:{MUTED};padding:14px 0;border-top:1px solid {BORDER};border-bottom:1px solid {BORDER};margin-bottom:24px;">
+        <span itemprop="author" style="font-weight:600;color:{INK};">{byline}</span>
+        <span aria-hidden="true">·</span>
+        <span>{rt} min read</span>
+      </div>
 
-    <div style="font-size:18px;line-height:1.8;color:{INK};">{intro_paras}</div>
+      {tldr}
 
-    {takeaways}
-    {toc}
-    {sections_html}
+      <div itemprop="articleBody" style="font-size:18px;line-height:1.8;color:{INK};margin-top:24px;">
+        {intro_paras}
+        {takeaways}
+        <nav role="doc-toc" aria-label="Table of contents">{toc}</nav>
+        {sections_html}
 
-    <section style="margin:40px 0;padding:28px 30px;background:{NAVY};border-radius:10px;color:#ffffff;">
-      <div style="font-size:11px;font-weight:700;letter-spacing:0.14em;text-transform:uppercase;color:{ACCENT};margin-bottom:12px;">The Bottom Line</div>
-      <div style="font-size:17px;line-height:1.7;">{conclusion_paras}</div>
-    </section>
+        <section style="margin:40px 0;padding:28px 30px;background:{NAVY};border-radius:10px;color:#ffffff;">
+          <div style="font-size:11px;font-weight:700;letter-spacing:0.14em;text-transform:uppercase;color:{ACCENT};margin-bottom:12px;">The Bottom Line</div>
+          <div style="font-size:17px;line-height:1.7;">{conclusion_paras}</div>
+        </section>
 
-    {faqs}
-    {sources}
-
+        {faqs}
+        {sources}
+      </div>
+    </article>
   </main>
 
-  <footer style="max-width:780px;margin:0 auto;padding:20px 24px 48px 24px;background:#ffffff;border-top:1px solid {BORDER};">
+  <footer role="contentinfo" style="max-width:780px;margin:0 auto;padding:20px 24px 48px 24px;background:#ffffff;border-top:1px solid {BORDER};">
     {tags}
     <div style="margin-top:16px;font-size:12px;color:{MUTED};text-align:center;">
       Published by Warren · UK personal finance, weekly.

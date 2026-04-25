@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import Counter
+from datetime import datetime, timezone
 from typing import List, Optional
 
 import anthropic
@@ -10,6 +12,45 @@ from ._json import parse_json_response
 
 log = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Diversity / dedup helpers (run pre- and post-LLM)
+# ---------------------------------------------------------------------------
+
+def _diversity_warning(articles: List[dict]) -> Optional[str]:
+    """If any one source contributes >50% of articles, return a soft warning string
+    to inject into the prompt so the editor balances coverage."""
+    if not articles:
+        return None
+    counts = Counter((a.get("source") or "Unknown") for a in articles)
+    top, n = counts.most_common(1)[0]
+    if n / max(len(articles), 1) > 0.5 and len(articles) >= 4:
+        return (
+            f"Source balance: {n}/{len(articles)} of the candidate articles come from "
+            f"{top}. Be careful not to over-represent any single outlet — frame the "
+            f"narrative across sources where possible, and explicitly attribute "
+            f"each fact to its outlet."
+        )
+    return None
+
+
+def _dedupe_sections(sections: List[dict]) -> List[dict]:
+    """Ensure no URL appears twice across sections (LLM occasionally repeats)."""
+    seen: set[str] = set()
+    cleaned: List[dict] = []
+    for s in sections or []:
+        kept = []
+        for a in s.get("articles", []) or []:
+            url = (a.get("url") or "").strip()
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            kept.append(a)
+        if kept:
+            s = {**s, "articles": kept}
+            cleaned.append(s)
+    return cleaned
+
 SYSTEM_PROMPT = (
     "You are the editor-in-chief of a premium UK personal-finance newsletter "
     "read by professionals, business owners, and engaged retail investors. "
@@ -17,13 +58,20 @@ SYSTEM_PROMPT = (
     "You return ONLY valid JSON. No markdown fences, no prose outside the JSON object."
 )
 
-USER_TEMPLATE = """Compose this edition of the UK personal-finance newsletter from the article summaries below.
+USER_TEMPLATE = """Compose this edition of the UK personal-finance newsletter from the article records below.
+
+Each input article carries: title, url, source, published_at, category, relevance_score,
+a `summary` (2-3 sentences), `key_points` (3-5 bullets), and an `excerpt` (raw text from
+the original article). USE the key_points and excerpt — do not just paraphrase the summary.
+
+{diversity_note}
+Today's edition date is: {today_human}. Use this when you need to refer to "today".
 
 Return a JSON object that EXACTLY matches this schema (do not add or omit keys):
 {{
   "subject_line": "string (compelling, <= 70 chars, no clickbait)",
   "preheader":    "string (preview text shown next to subject in inboxes, <= 110 chars)",
-  "edition_label":"string (e.g. 'Issue 42 · Wed 22 Apr 2026')",
+  "edition_label":"string (e.g. 'Issue 42 · Wed 22 Apr 2026') — leave empty string if you have no issue number; the system will fill the date",
   "intro": "string (1 short paragraph, 2-3 sentences, framing today's themes)",
   "editor_pick": {{
       "title":   "string (the single most important article title from the input)",
@@ -57,7 +105,7 @@ Rules:
 - "why_it_matters" is concrete: what changes for the reader's money.
 - No emojis. No exclamation marks. No marketing fluff.
 
-Article summaries (JSON):
+Article records (JSON):
 {articles_json}
 """
 
@@ -68,8 +116,16 @@ def generate_newsletter(
     if not article_summaries:
         return None
 
+    today = datetime.now(timezone.utc)
+    today_human = today.strftime("%a %d %B %Y")
+    diversity_note = _diversity_warning(article_summaries) or ""
+    if diversity_note:
+        diversity_note = f"⚠ {diversity_note}\n"
+
     prompt = USER_TEMPLATE.format(
-        articles_json=json.dumps(article_summaries, ensure_ascii=False, indent=2)
+        articles_json=json.dumps(article_summaries, ensure_ascii=False, indent=2),
+        today_human=today_human,
+        diversity_note=diversity_note,
     )
     try:
         resp = client.messages.create(
@@ -93,4 +149,12 @@ def generate_newsletter(
     data.setdefault("edition_label", "")
     data.setdefault("editor_pick", None)
     data.setdefault("signature", "The Warren Editorial Desk")
+
+    # --- Server-side post-processing -----------------------------------------
+    # Always overwrite edition_label with a real date so the LLM can't guess it wrong.
+    data["edition_label"] = today_human
+    # Dedupe articles across sections (LLM occasionally repeats).
+    data["sections"] = _dedupe_sections(data.get("sections", []))
+    # Diversity metadata for downstream UI/formatter.
+    data["_diversity_warning"] = _diversity_warning(article_summaries)
     return data
