@@ -413,21 +413,14 @@ def _all_sources() -> list[tuple[str, str]]:
 
 
 def _schedule_table() -> dbc.Table:
-    """Build a live source schedule status table from the DB."""
-    from src.database import get_source_log, is_source_due, FREQ_DAYS
+    """Build a 'last scraped' table from the DB. No schedule, manual runs only."""
+    from src.database import get_source_log
     from src.scraper import RSS_SOURCE_OVERRIDES
 
     GOVUK_NAMES = {
         "office-for-national-statistics": "Office For National Statistics",
         "hm-revenue-customs":             "Hm Revenue Customs",
     }
-
-    def _freq_for(name: str) -> str:
-        sl = name.lower()
-        for k, v in cfg.source_schedules.items():
-            if k.lower() in sl or sl in k.lower():
-                return v
-        return "daily"
 
     try:
         conn = get_connection(cfg.db_path)
@@ -444,24 +437,15 @@ def _schedule_table() -> dbc.Table:
 
     rows = []
     for key, name in all_sources:
-        freq   = _freq_for(name)
         row    = log_rows.get(key)
         last   = row["last_scraped_at"][:19].replace("T", " ") if (row and row["last_scraped_at"]) else "Never"
-        due    = not row or not row["last_scraped_at"] or is_source_due(
-            get_connection(cfg.db_path), key, freq
-        )
-        badge  = dbc.Badge("● Due",     color="success", className="me-1") if due \
-            else dbc.Badge("○ Waiting", color="secondary", className="me-1")
-        freq_color = {"daily": "success", "weekly": "primary", "monthly": "warning"}.get(freq, "secondary")
         rows.append(html.Tr([
             html.Td(name,  style={"fontWeight": "500"}),
-            html.Td(dbc.Badge(freq.title(), color=freq_color)),
             html.Td(last,  className="text-muted", style={"fontSize": "13px"}),
-            html.Td(badge),
         ]))
 
     return dbc.Table(
-        [html.Thead(html.Tr([html.Th("Source"), html.Th("Frequency"), html.Th("Last Scraped"), html.Th("Status")])),
+        [html.Thead(html.Tr([html.Th("Source"), html.Th("Last Scraped")])),
          html.Tbody(rows)],
         bordered=False, hover=True, size="sm", className="mb-0",
     )
@@ -473,24 +457,21 @@ def _scrape_layout():
         dbc.Card(dbc.CardBody([
             dbc.Row([
                 dbc.Col([
-                    html.H6("Source Schedule", className="fw-bold text-primary mb-2"),
+                    html.H6("Last Scraped", className="fw-bold text-primary mb-2"),
                     _schedule_table(),
                 ], md=8),
                 dbc.Col([
-                    html.H6("Run Options", className="fw-bold text-primary mb-2"),
+                    html.H6("Run Scrape", className="fw-bold text-primary mb-2"),
                     dbc.Button([
-                        "▶  Scrape Due Sources ",
+                        "▶  Scrape All Sources ",
                         html.Sup("ⓘ", style={"fontSize": "0.65em", "opacity": "0.7"}),
                     ], id="scrape-btn", color="primary", size="md", className="d-block w-100 mb-2"),
-                    dbc.Tooltip("Fetches only sources that are due based on their schedule (daily / weekly / monthly). Skips sources scraped recently.",
+                    dbc.Tooltip("Manually scrapes every configured source right now. Scraping only runs when you trigger it.",
                                 target="scrape-btn", placement="left"),
 
-                    dbc.Button([
-                        "⚡  Force All Sources ",
-                        html.Sup("ⓘ", style={"fontSize": "0.65em", "opacity": "0.7"}),
-                    ], id="scrape-force-btn", color="outline-warning", size="md", className="d-block w-100 mb-2"),
-                    dbc.Tooltip("Ignores the schedule and scrapes every source immediately. Use for a full refresh or after adding new sources.",
-                                target="scrape-force-btn", placement="left"),
+                    # Hidden legacy button — kept so existing callbacks remain valid.
+                    dbc.Button("Force All", id="scrape-force-btn",
+                               style={"display": "none"}, disabled=True),
 
                     dbc.Button([
                         "⏹  Stop ",
@@ -507,7 +488,7 @@ def _scrape_layout():
         # On-demand source picker
         dbc.Card(dbc.CardBody([
             html.H6("On-Demand Scrape", className="fw-bold text-primary mb-2"),
-            html.P("Pick any sources to scrape right now — schedules are ignored for the selected ones.",
+            html.P("Pick any sources to scrape right now.",
                    className="text-muted small mb-3"),
             dbc.Row([
                 dbc.Col([
@@ -527,7 +508,7 @@ def _scrape_layout():
                         "▶  Scrape Selected ",
                         html.Sup("ⓘ", style={"fontSize": "0.65em", "opacity": "0.7"}),
                     ], id="scrape-selected-btn", color="success", size="md", disabled=True),
-                    dbc.Tooltip("Runs an immediate scrape against ONLY the sources you ticked above, ignoring their schedule.",
+                    dbc.Tooltip("Runs an immediate scrape against ONLY the sources you ticked above.",
                                 target="scrape-selected-btn", placement="left"),
                 ], md=4, className="text-end"),
             ]),
@@ -574,10 +555,9 @@ def control_scrape(start_clicks, force_clicks, selected_clicks, stop_clicks,
         tmp.close()
         _scrape["output_file"] = tmp.name
         cmd = [VENV_PYTHON, "main.py", "scrape"]
-        if trigger == "scrape-force-btn":
-            cmd.append("--force")
-        elif trigger == "scrape-selected-btn":
+        if trigger == "scrape-selected-btn":
             cmd += ["--sources", ",".join(selected_sources)]
+        # scrape-btn / scrape-force-btn (legacy hidden) → scrape all sources, no flag
         _scrape["proc"] = subprocess.Popen(
             cmd,
             stdout=open(tmp.name, "w"),

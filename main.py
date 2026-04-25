@@ -13,7 +13,6 @@ from src.database import (
     get_source_log,
     init_db,
     insert_article,
-    is_source_due,
     mark_source_scraped,
     query_articles,
 )
@@ -44,13 +43,15 @@ def cli() -> None:
 
 
 @cli.command()
-@click.option("--force", is_flag=True, default=False,
-              help="Ignore schedule and scrape all sources regardless of last run.")
 @click.option("--sources", default=None,
-              help="Comma-separated source keys (URLs or GOV.UK slugs) to scrape on demand. "
-                   "Implies --force for the selected sources only.")
-def scrape(force: bool, sources: str | None) -> None:
-    """Fetch, deduplicate, pre-filter, summarise, and store new articles."""
+              help="Comma-separated source keys (URLs or GOV.UK slugs) to scrape. "
+                   "If omitted, all configured sources are scraped.")
+def scrape(sources: str | None) -> None:
+    """Fetch, deduplicate, pre-filter, summarise, and store new articles.
+
+    Runs only when invoked manually — there is no schedule. By default every
+    configured source is scraped; pass --sources to limit to a subset.
+    """
     cfg = load_config()
     conn = get_connection(cfg.db_path)
     init_db(conn)
@@ -59,7 +60,9 @@ def scrape(force: bool, sources: str | None) -> None:
     selected = None
     if sources:
         selected = {s.strip() for s in sources.split(",") if s.strip()}
-        click.echo(f"On-demand mode: scraping {len(selected)} selected source(s), ignoring schedule.")
+        click.echo(f"Scraping {len(selected)} selected source(s).")
+    else:
+        click.echo("Scraping all configured sources.")
 
     def _frequency_for(source_name: str) -> str:
         sl = source_name.lower()
@@ -72,10 +75,9 @@ def scrape(force: bool, sources: str | None) -> None:
         return RSS_SOURCE_OVERRIDES.get(url, url)
 
     # -----------------------------------------------------------------------
-    # Collect articles source by source, respecting schedule
+    # Collect articles source by source (no schedule gating)
     # -----------------------------------------------------------------------
     raw = []
-    skipped_sources = []
 
     # RSS feeds
     for url in cfg.rss_feeds:
@@ -83,11 +85,7 @@ def scrape(force: bool, sources: str | None) -> None:
         freq = _frequency_for(name)
         if selected is not None and url not in selected:
             continue
-        if selected is None and not force and not is_source_due(conn, url, freq):
-            skipped_sources.append((name, freq))
-            click.echo(f"  ⏭  {name} ({freq}) — not due yet, skipping")
-            continue
-        click.echo(f"  ⬇  {name} ({freq})")
+        click.echo(f"  ⬇  {name}")
         articles = fetch_rss([url])
         raw.extend(articles)
         mark_source_scraped(conn, url, name, freq)
@@ -103,11 +101,7 @@ def scrape(force: bool, sources: str | None) -> None:
         freq = _frequency_for(name)
         if selected is not None and slug not in selected:
             continue
-        if selected is None and not force and not is_source_due(conn, slug, freq):
-            skipped_sources.append((name, freq))
-            click.echo(f"  ⏭  {name} ({freq}) — not due yet, skipping")
-            continue
-        click.echo(f"  ⬇  {name} ({freq})")
+        click.echo(f"  ⬇  {name}")
         articles = fetch_govuk_api([slug])
         raw.extend(articles)
         mark_source_scraped(conn, slug, name, freq)
@@ -118,18 +112,11 @@ def scrape(force: bool, sources: str | None) -> None:
         freq = _frequency_for(url)
         if selected is not None and url not in selected:
             continue
-        if selected is None and not force and not is_source_due(conn, url, freq):
-            click.echo(f"  ⏭  {url} ({freq}) — not due yet, skipping")
-            continue
-        click.echo(f"  ⬇  {url} ({freq})")
+        click.echo(f"  ⬇  {url}")
         articles = fetch_http([url])
         raw.extend(articles)
         mark_source_scraped(conn, url, url, freq)
         click.echo(f"      fetched {len(articles)}")
-
-    if not raw and skipped_sources:
-        click.echo(f"\nAll sources are up to date. Run with --force to override.")
-        return
 
     click.echo(f"\nFetched {len(raw)} articles total.")
 
@@ -182,52 +169,6 @@ def scrape(force: bool, sources: str | None) -> None:
         f"prefiltered={dropped_kw} low-score={skipped_relevance} "
         f"compliance-flagged={compliance_warned} inserted={inserted}."
     )
-    if skipped_sources:
-        click.echo(f"Skipped {len(skipped_sources)} source(s) not yet due: "
-                   f"{', '.join(n for n, _ in skipped_sources)}")
-
-
-@cli.command()
-def schedule() -> None:
-    """Show the scrape schedule — which sources are due and which are waiting."""
-    cfg = load_config()
-    conn = get_connection(cfg.db_path)
-    init_db(conn)
-
-    from src.scraper import RSS_SOURCE_OVERRIDES
-    from src.database import FREQ_DAYS
-    from datetime import datetime, timezone
-
-    GOVUK_NAMES = {
-        "office-for-national-statistics": "Office For National Statistics",
-        "hm-revenue-customs":             "Hm Revenue Customs",
-    }
-
-    def _frequency_for(name: str) -> str:
-        sl = name.lower()
-        for k, v in cfg.source_schedules.items():
-            if k.lower() in sl or sl in k.lower():
-                return v
-        return "daily"
-
-    all_sources = (
-        [(url, RSS_SOURCE_OVERRIDES.get(url, url)) for url in cfg.rss_feeds] +
-        [(slug, GOVUK_NAMES.get(slug, slug)) for slug in cfg.govuk_orgs]
-    )
-
-    log_rows = {r["source_key"]: r for r in get_source_log(conn)}
-
-    click.echo(f"\n{'Source':<40} {'Freq':<8} {'Last Scraped':<22} {'Status'}")
-    click.echo("-" * 85)
-    for key, name in all_sources:
-        freq    = _frequency_for(name)
-        row     = log_rows.get(key)
-        last    = row["last_scraped_at"] if row else None
-        due     = is_source_due(conn, key, freq)
-        status  = click.style("● DUE",  fg="green") if due else click.style("○ waiting", fg="yellow")
-        last_str = last[:19].replace("T", " ") if last else "never"
-        click.echo(f"{name:<40} {freq:<8} {last_str:<22} {status}")
-    click.echo()
 
 
 @cli.command()
