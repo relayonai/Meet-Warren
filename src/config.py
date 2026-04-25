@@ -39,6 +39,7 @@ class Config:
     anthropic_api_key: str
     anthropic_auth_token: str
     anthropic_model: str
+    compliance_model: str   # smaller/faster model for grading + revising
     rss_feeds: List[str]
     http_sources: List[str]
     govuk_orgs: List[str]
@@ -74,6 +75,7 @@ def load_config() -> Config:
         anthropic_api_key=api_key,
         anthropic_auth_token=auth_token,
         anthropic_model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514").strip(),
+        compliance_model=os.getenv("COMPLIANCE_MODEL", "claude-haiku-4-5").strip(),
         rss_feeds=_split_csv(os.getenv("RSS_FEEDS")),
         http_sources=_split_csv(os.getenv("HTTP_SOURCES")),
         govuk_orgs=_split_csv(os.getenv("GOVUK_ORGS")),

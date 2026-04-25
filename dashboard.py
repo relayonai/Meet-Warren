@@ -5,6 +5,11 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
+import time
+import traceback
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, date
 
 import dash
@@ -790,7 +795,10 @@ def _create_page():
         ]), className="mb-3 shadow-sm"),
 
         # --- Output ---
-        dbc.Spinner(html.Div(id="cr-output"), color="success", type="border"),
+        # Hidden state for the background generation job:
+        dcc.Store(id="cr-job-id"),
+        dcc.Interval(id="cr-job-poll", interval=600, disabled=True),
+        html.Div(id="cr-output"),
     ])
 
 
@@ -876,10 +884,11 @@ def select_content_type(nl_clicks, blog_clicks, current):
 
 
 @app.callback(
-    Output("cr-generate-btn",  "disabled"),
+    Output("cr-generate-btn",  "disabled", allow_duplicate=True),
     Output("cr-generate-hint", "children"),
     Input("cr-table",          "selected_rows"),
     Input("cr-content-type",   "data"),
+    prevent_initial_call="initial_duplicate",
 )
 def update_generate_btn(selected, content_type):
     n = len(selected or [])
@@ -892,38 +901,83 @@ def update_generate_btn(selected, content_type):
     return False, f"Ready — {n} article{'s' if n != 1 else ''} selected as {content_type}."
 
 
-@app.callback(
-    Output("cr-output",       "children"),
-    Input("cr-generate-btn",  "n_clicks"),
-    State("cr-table",         "selected_rows"),
-    State("cr-table",         "data"),
-    State("cr-content-type",  "data"),
-    prevent_initial_call=True,
-)
-def generate_content(_, selected_rows, table_data, content_type):
-    if not selected_rows or not table_data or not content_type:
-        return dbc.Alert("Nothing to generate — check your selections.", color="warning")
+# ---------------------------------------------------------------------------
+# Generation jobs (background thread + polling) so the UI stays alive while
+# Claude is drafting / compliance is running. Without this the whole callback
+# blocks for 30–90s with no feedback.
+# ---------------------------------------------------------------------------
 
-    # Gather titles of selected rows, look up full records from DB (incl. raw_content)
-    selected_titles = [table_data[i]["title"] for i in selected_rows]
-    df = _get_df()
-    rows_df = df[df["title"].isin(selected_titles)]
-    if rows_df.empty:
-        return dbc.Alert("Could not load article data.", color="danger")
+_jobs: dict[str, dict] = {}        # job_id → {stage, label, started_at, error, result_div}
+_jobs_lock = threading.Lock()
 
-    # Fetch raw_content excerpts so the editor isn't summarising summaries.
-    try:
-        conn_raw = get_connection(cfg.db_path)
-        ids = [r["id"] for _, r in rows_df.iterrows()]
-        placeholders = ",".join("?" * len(ids))
-        raw_rows = conn_raw.execute(
-            f"SELECT id, raw_content FROM articles WHERE id IN ({placeholders})", ids
-        ).fetchall()
-        conn_raw.close()
-        raw_by_id = {r["id"]: (r["raw_content"] or "") for r in raw_rows}
-    except Exception:
-        raw_by_id = {}
+# Stage labels shown in the progress card. Must match what the worker sets.
+_STAGES = [
+    ("collect",    "Loading article context"),
+    ("draft",      "Drafting with Claude"),
+    ("compliance", "Compliance grading + revision"),
+    ("export",     "Rendering PDF, DOCX, Markdown, EML"),
+    ("done",       "Done"),
+]
 
+
+def _set_stage(job_id: str, stage_key: str, *, sub: str = "") -> None:
+    with _jobs_lock:
+        if job_id not in _jobs:
+            return
+        _jobs[job_id]["stage"] = stage_key
+        _jobs[job_id]["sub"]   = sub
+
+
+def _progress_card(job_id: str) -> html.Div:
+    job = _jobs.get(job_id) or {}
+    current_stage = job.get("stage", "collect")
+    sub = job.get("sub", "")
+    started = job.get("started_at") or time.time()
+    elapsed = int(time.time() - started)
+
+    # Stage list with check / spinner / dot icons.
+    current_idx = next((i for i, (k, _) in enumerate(_STAGES) if k == current_stage), 0)
+    rows = []
+    for i, (key, label) in enumerate(_STAGES):
+        if i < current_idx or key == "done" and current_stage == "done":
+            icon = html.Span("✅", style={"width": "22px", "display": "inline-block"})
+            cls  = "text-success fw-semibold"
+        elif i == current_idx:
+            icon = dbc.Spinner(size="sm", color="primary",
+                               spinner_style={"width": "1rem", "height": "1rem",
+                                              "marginRight": "4px"})
+            cls  = "text-primary fw-bold"
+        else:
+            icon = html.Span("○", style={"width": "22px", "display": "inline-block",
+                                          "color": "#c0c8d4"})
+            cls  = "text-muted"
+        sub_txt = (f"  —  {sub}" if (i == current_idx and sub) else "")
+        rows.append(html.Div([icon, html.Span(label + sub_txt, className=cls)],
+                              className="mb-2"))
+
+    pct = int(((current_idx) / max(len(_STAGES) - 1, 1)) * 100)
+    if current_stage == "done":
+        pct = 100
+
+    return html.Div([
+        dbc.Card(dbc.CardBody([
+            dbc.Row([
+                dbc.Col([
+                    html.H6("Generating your content", className="fw-bold mb-1"),
+                    html.Small(f"Elapsed: {elapsed}s", className="text-muted"),
+                ], md=8),
+                dbc.Col([
+                    dbc.Badge(f"{pct}%", color="primary", className="float-end fs-6"),
+                ], md=4),
+            ], className="mb-3"),
+            dbc.Progress(value=pct, striped=True, animated=(current_stage != "done"),
+                         className="mb-3", style={"height": "8px"}),
+            html.Div(rows),
+        ]), className="shadow-sm mb-3", style={"borderLeft": "4px solid #1a4f8b"}),
+    ])
+
+
+def _build_summaries(rows_df, raw_by_id) -> list[dict]:
     summaries = []
     for _, row in rows_df.iterrows():
         excerpt = (raw_by_id.get(row["id"], "") or "").strip()
@@ -940,148 +994,177 @@ def generate_content(_, selected_rows, table_data, content_type):
             "relevance_score": row["relevance_score"],
             "excerpt":         excerpt,
         })
+    return summaries
 
-    client = build_anthropic_client(cfg)
-    os.makedirs(cfg.output_dir, exist_ok=True)
-    today_str = datetime.utcnow().strftime("%Y-%m-%d")
 
-    def _versioned(prefix: str) -> str:
-        """Return e.g. 'newsletter-2026-04-25-v3' picking next free version for today."""
-        n = 1
-        while True:
-            base = f"{prefix}-{today_str}-v{n}"
-            if not os.path.exists(os.path.join(cfg.output_dir, f"{base}.html")):
-                return base
-            n += 1
+def _run_generation_job(job_id: str, summaries: list, content_type: str) -> None:
+    """Heavy work: LLM draft → compliance → multi-format export. Runs in a thread."""
+    try:
+        client = build_anthropic_client(cfg)
+        os.makedirs(cfg.output_dir, exist_ok=True)
+        today_str = datetime.utcnow().strftime("%Y-%m-%d")
 
-    def _write_all_formats(base: str, *, kind: str, result: dict, html_str: str,
-                           text_str: str, subject: str, summaries_in: list,
-                           compliance_dict: dict) -> dict:
-        """Write html/txt/json/md/pdf/docx/eml. Returns {ext: abs_path}."""
-        paths = {
-            "html": os.path.join(cfg.output_dir, f"{base}.html"),
-            "txt":  os.path.join(cfg.output_dir, f"{base}.txt"),
-            "md":   os.path.join(cfg.output_dir, f"{base}.md"),
-            "pdf":  os.path.join(cfg.output_dir, f"{base}.pdf"),
-            "docx": os.path.join(cfg.output_dir, f"{base}.docx"),
-            "eml":  os.path.join(cfg.output_dir, f"{base}.eml"),
-            "json": os.path.join(cfg.output_dir, f"{base}.json"),
-        }
-        # Always-on text formats
-        with open(paths["html"], "w") as f: f.write(html_str)
-        with open(paths["txt"],  "w") as f: f.write(text_str)
-        try:
-            with open(paths["md"], "w") as f:
-                f.write(to_markdown(result, kind=kind))
-        except Exception as e:
-            log_warn = f"Markdown export failed: {e}"
-            paths.pop("md", None)
-            print(log_warn)
-        # Binary formats — best-effort, don't break the run if a renderer trips
-        try:
-            with open(paths["pdf"], "wb") as f: f.write(to_pdf(html_str))
-        except Exception as e:
-            print(f"PDF export failed: {e}")
-            paths.pop("pdf", None)
-        try:
-            with open(paths["docx"], "wb") as f: f.write(to_docx(result, kind=kind))
-        except Exception as e:
-            print(f"DOCX export failed: {e}")
-            paths.pop("docx", None)
-        try:
-            with open(paths["eml"], "wb") as f:
-                f.write(to_eml(html_str, text_str, subject))
-        except Exception as e:
-            print(f"EML export failed: {e}")
-            paths.pop("eml", None)
-        # JSON: input + LLM result + compliance summary for replay/audit
-        try:
-            with open(paths["json"], "w") as f:
-                json.dump({
-                    "kind": kind,
-                    "generated_at_utc": datetime.utcnow().isoformat(),
-                    "subject_or_title": subject,
-                    "input_articles": summaries_in,
-                    "result": result,
-                    "compliance_summary": (compliance_dict or {})
-                        .get("final_grade", {}).get("summary", {}),
-                }, f, indent=2, ensure_ascii=False, default=str)
-        except Exception as e:
-            print(f"JSON export failed: {e}")
-            paths.pop("json", None)
-        return paths
+        def _versioned(prefix: str) -> str:
+            n = 1
+            while True:
+                base = f"{prefix}-{today_str}-v{n}"
+                if not os.path.exists(os.path.join(cfg.output_dir, f"{base}.html")):
+                    return base
+                n += 1
 
-    if content_type == "newsletter":
-        result = generate_newsletter(summaries, client, cfg.anthropic_model)
-        if not result:
-            return dbc.Alert("Newsletter generation failed.", color="danger")
-        out_html = to_html(result)
-        out_text = to_text(result)
-        subject  = result.get("subject_line", "UK Personal Finance Digest")
-        base = _versioned("newsletter")
-        # Compliance enforcement loop (runs on the HTML before we write any format)
+        _set_stage(job_id, "draft", sub=f"{content_type} from {len(summaries)} article(s)")
+        if content_type == "newsletter":
+            result = generate_newsletter(summaries, client, cfg.anthropic_model)
+            if not result:
+                raise RuntimeError("Newsletter generation returned no content.")
+            out_html, out_text = to_html(result), to_text(result)
+            subject = result.get("subject_line", "UK Personal Finance Digest")
+            base = _versioned("newsletter")
+            kind = "newsletter"
+        elif content_type == "blog":
+            result = generate_blog_post(summaries, client, cfg.anthropic_model)
+            if not result:
+                raise RuntimeError("Blog post generation returned no content.")
+            out_html, out_text = blog_to_html(result), blog_to_text(result)
+            subject = result.get("title", "Blog Post")
+            base = _versioned("blog")
+            kind = "blog"
+        else:
+            raise RuntimeError(f"Unknown content type: {content_type}")
+
+        _set_stage(job_id, "compliance")
         conn_c = get_connection(cfg.db_path)
-        compliance = ensure_compliant(out_html, kind="newsletter",
-                                      client=client, model=cfg.anthropic_model,
-                                      conn=conn_c, content_ref=f"{base}.html")
+        compliance = ensure_compliant(
+            out_html, kind=kind, client=client, model=cfg.anthropic_model,
+            grader_model=cfg.compliance_model, conn=conn_c,
+            content_ref=f"{base}.html",
+            progress_cb=lambda s: _set_stage(job_id, "compliance", sub=s),
+        )
         out_html = compliance["final_content"]
-        paths = _write_all_formats(base, kind="newsletter", result=result,
+        # Re-render text from the (possibly revised) HTML? Source of truth is the
+        # `result` dict, so plaintext stays in sync — only HTML is mutated.
+
+        _set_stage(job_id, "export", sub="7 formats in parallel")
+        paths = _write_all_formats(base, kind=kind, result=result,
                                    html_str=out_html, text_str=out_text,
                                    subject=subject, summaries_in=summaries,
                                    compliance_dict=compliance)
-        sections_list = []
-        if result.get("edition_label"):
-            sections_list.append(dbc.ListGroupItem(f"🗓️ {result['edition_label']}"))
-        pick = result.get("editor_pick") or {}
-        if pick.get("title"):
-            sections_list.append(dbc.ListGroupItem(f"★ Editor's Pick: {pick['title'][:60]}"))
-        sections_list += [
-            dbc.ListGroupItem(f"📌 {s.get('heading','')} — {len(s.get('articles',[]))} article(s)")
-            for s in result.get("sections", [])
-        ]
-        return _content_preview("✉️ Newsletter Generated", subject,
-                                 paths, out_html, sections_list, compliance)
 
-    if content_type == "blog":
-        result = generate_blog_post(summaries, client, cfg.anthropic_model)
-        if not result:
-            return dbc.Alert("Blog post generation failed.", color="danger")
-        out_html = blog_to_html(result)
-        out_text = blog_to_text(result)
-        title    = result.get("title", "Blog Post")
-        base = _versioned("blog")
-        conn_c = get_connection(cfg.db_path)
-        compliance = ensure_compliant(out_html, kind="blog",
-                                      client=client, model=cfg.anthropic_model,
-                                      conn=conn_c, content_ref=f"{base}.html")
-        out_html = compliance["final_content"]
-        paths = _write_all_formats(base, kind="blog", result=result,
-                                   html_str=out_html, text_str=out_text,
-                                   subject=title, summaries_in=summaries,
-                                   compliance_dict=compliance)
-        meta_list = []
-        rt = result.get("reading_time_minutes")
-        if rt:
-            meta_list.append(dbc.ListGroupItem(f"⏱️ {rt} min read"))
-        if result.get("byline"):
-            meta_list.append(dbc.ListGroupItem(f"✍️ {result['byline']}"))
-        kt = result.get("key_takeaways") or []
-        if kt:
-            meta_list.append(dbc.ListGroupItem(f"💡 {len(kt)} key takeaways"))
-        meta_list += [
-            dbc.ListGroupItem(f"📌 {s.get('heading', '')}")
-            for s in result.get("sections", [])
-        ]
-        if result.get("faqs"):
-            meta_list.append(dbc.ListGroupItem(f"❓ {len(result['faqs'])} FAQs"))
-        if result.get("sources_cited"):
-            meta_list.append(dbc.ListGroupItem(f"🔗 {len(result['sources_cited'])} sources cited"))
-        if result.get("seo_tags"):
-            meta_list.append(dbc.ListGroupItem("🏷️ " + " ".join(f"#{t}" for t in result["seo_tags"])))
-        return _content_preview("📝 Blog Post Generated", title,
-                                 paths, out_html, meta_list, compliance)
+        # --- Build final preview component ----------------------------------
+        if kind == "newsletter":
+            sections_list = []
+            if result.get("edition_label"):
+                sections_list.append(dbc.ListGroupItem(f"🗓️ {result['edition_label']}"))
+            pick = result.get("editor_pick") or {}
+            if pick.get("title"):
+                sections_list.append(dbc.ListGroupItem(f"★ Editor's Pick: {pick['title'][:60]}"))
+            sections_list += [
+                dbc.ListGroupItem(f"📌 {s.get('heading','')} — {len(s.get('articles',[]))} article(s)")
+                for s in result.get("sections", [])
+            ]
+            preview = _content_preview("✉️ Newsletter Generated", subject,
+                                        paths, out_html, sections_list, compliance)
+        else:
+            meta_list = []
+            rt = result.get("reading_time_minutes")
+            if rt:                          meta_list.append(dbc.ListGroupItem(f"⏱️ {rt} min read"))
+            if result.get("byline"):        meta_list.append(dbc.ListGroupItem(f"✍️ {result['byline']}"))
+            kt = result.get("key_takeaways") or []
+            if kt:                          meta_list.append(dbc.ListGroupItem(f"💡 {len(kt)} key takeaways"))
+            meta_list += [dbc.ListGroupItem(f"📌 {s.get('heading','')}")
+                          for s in result.get("sections", [])]
+            if result.get("faqs"):          meta_list.append(dbc.ListGroupItem(f"❓ {len(result['faqs'])} FAQs"))
+            if result.get("sources_cited"): meta_list.append(dbc.ListGroupItem(f"🔗 {len(result['sources_cited'])} sources cited"))
+            if result.get("seo_tags"):      meta_list.append(dbc.ListGroupItem("🏷️ " + " ".join(f"#{t}" for t in result["seo_tags"])))
+            preview = _content_preview("📝 Blog Post Generated", subject,
+                                        paths, out_html, meta_list, compliance)
 
-    return dbc.Alert("Unknown content type.", color="danger")
+        with _jobs_lock:
+            _jobs[job_id]["stage"]      = "done"
+            _jobs[job_id]["sub"]        = ""
+            _jobs[job_id]["result_div"] = preview
+    except Exception as e:
+        traceback.print_exc()
+        with _jobs_lock:
+            _jobs[job_id]["stage"] = "done"
+            _jobs[job_id]["error"] = f"{type(e).__name__}: {e}"
+
+
+@app.callback(
+    Output("cr-output",      "children", allow_duplicate=True),
+    Output("cr-job-id",      "data"),
+    Output("cr-job-poll",    "disabled"),
+    Output("cr-generate-btn","disabled", allow_duplicate=True),
+    Input("cr-generate-btn",  "n_clicks"),
+    State("cr-table",         "selected_rows"),
+    State("cr-table",         "data"),
+    State("cr-content-type",  "data"),
+    prevent_initial_call=True,
+)
+def kickoff_generation(_, selected_rows, table_data, content_type):
+    if not selected_rows or not table_data or not content_type:
+        return (dbc.Alert("Nothing to generate — check your selections.",
+                          color="warning"),
+                no_update, True, False)
+
+    selected_titles = [table_data[i]["title"] for i in selected_rows]
+    df = _get_df()
+    rows_df = df[df["title"].isin(selected_titles)]
+    if rows_df.empty:
+        return (dbc.Alert("Could not load article data.", color="danger"),
+                no_update, True, False)
+
+    # Pull raw_content excerpts so the editor synthesises real source material.
+    try:
+        conn_raw = get_connection(cfg.db_path)
+        ids = [r["id"] for _, r in rows_df.iterrows()]
+        placeholders = ",".join("?" * len(ids))
+        raw_rows = conn_raw.execute(
+            f"SELECT id, raw_content FROM articles WHERE id IN ({placeholders})", ids
+        ).fetchall()
+        conn_raw.close()
+        raw_by_id = {r["id"]: (r["raw_content"] or "") for r in raw_rows}
+    except Exception:
+        raw_by_id = {}
+
+    summaries = _build_summaries(rows_df, raw_by_id)
+    job_id = uuid.uuid4().hex[:12]
+    with _jobs_lock:
+        _jobs[job_id] = {
+            "stage": "collect", "sub": "", "started_at": time.time(),
+            "error": None, "result_div": None,
+        }
+    threading.Thread(target=_run_generation_job,
+                     args=(job_id, summaries, content_type),
+                     daemon=True).start()
+    return _progress_card(job_id), job_id, False, True
+
+
+@app.callback(
+    Output("cr-output",       "children", allow_duplicate=True),
+    Output("cr-job-poll",     "disabled", allow_duplicate=True),
+    Output("cr-generate-btn", "disabled", allow_duplicate=True),
+    Input("cr-job-poll",      "n_intervals"),
+    State("cr-job-id",        "data"),
+    prevent_initial_call=True,
+)
+def poll_generation(_n, job_id):
+    if not job_id or job_id not in _jobs:
+        return no_update, True, False
+    job = _jobs[job_id]
+    if job.get("error"):
+        msg = dbc.Alert([html.Strong("Generation failed: "), job["error"]],
+                        color="danger")
+        # Free the slot
+        _jobs.pop(job_id, None)
+        return msg, True, False
+    if job.get("stage") == "done" and job.get("result_div") is not None:
+        result = job["result_div"]
+        _jobs.pop(job_id, None)
+        return result, True, False
+    # Still running — refresh the progress card.
+    return _progress_card(job_id), False, True
+
 
 
 def _compliance_card(compliance: dict) -> dbc.Card:

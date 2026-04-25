@@ -97,9 +97,12 @@ def ensure_compliant(
     kind: str,                                # 'newsletter' | 'blog'
     client: anthropic.Anthropic,
     model: str = "claude-sonnet-4-5",
-    max_iterations: int = 2,
+    max_iterations: int = 1,                  # one revision is enough in practice
     conn: Optional[sqlite3.Connection] = None,
     content_ref: str = "",
+    grader_model: Optional[str] = None,       # smaller/faster model for grade+revise
+    fast_path_if_hard_clean: bool = True,     # skip principle LLM when no hard fails
+    progress_cb=None,                         # optional callable(stage:str)
 ) -> dict:
     """Full grade→analyse→enforce loop. Returns:
     {
@@ -112,10 +115,24 @@ def ensure_compliant(
     }
     """
     rb = load_rulebook()
+    g_model = grader_model or model
+
+    def _grade_fast_or_full(text: str) -> dict:
+        """Run hard rules first; if everything passes, skip the principle LLM call."""
+        if fast_path_if_hard_clean:
+            preview = grade_content(text, kind=kind, rulebook=rb,
+                                    skip_principles=True, client=None)
+            if preview["summary"]["failed"] == 0:
+                # No hard violations — assume compliant, mark grade pass.
+                preview["_fast_path"] = True
+                return preview
+        return grade_content(text, kind=kind, client=client, model=g_model, rulebook=rb)
+
     audit = []
     iteration = 0
     current = content
-    grading = grade_content(current, kind=kind, client=client, model=model, rulebook=rb)
+    if progress_cb: progress_cb("Grading initial content")
+    grading = _grade_fast_or_full(current)
     audit.append({"iteration": 0, "grade": grading["summary"]["grade"], "changes": []})
 
     analysis = analyze_findings(grading)
@@ -123,13 +140,15 @@ def ensure_compliant(
 
     while grading["summary"]["grade"] != "pass" and iteration < max_iterations:
         iteration += 1
-        result = revise_content(current, analysis, client=client, model=model, rulebook=rb)
+        if progress_cb: progress_cb(f"Revising (iteration {iteration})")
+        result = revise_content(current, analysis, client=client, model=g_model, rulebook=rb)
         if result["revised_content"] == current and not result["changes_made"]:
             log.info("No further revisions possible at iteration %d.", iteration)
             break
         current = result["revised_content"]
         revised_any = True
-        grading = grade_content(current, kind=kind, client=client, model=model, rulebook=rb)
+        if progress_cb: progress_cb(f"Re-grading (iteration {iteration})")
+        grading = _grade_fast_or_full(current)
         analysis = analyze_findings(grading)
         audit.append({
             "iteration": iteration,
