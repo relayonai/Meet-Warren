@@ -18,6 +18,7 @@ from src.compliance import ensure_compliant, load_rulebook
 from src.compliance.pipeline import init_compliance_tables
 from src.config import build_anthropic_client, load_config
 from src.database import get_connection, init_db, query_articles
+from src.exporters import to_pdf, to_docx, to_markdown, to_eml
 from src.formatter import to_html, to_text
 from src.generator import generate_newsletter
 
@@ -41,6 +42,21 @@ app = dash.Dash(
 _scrape: dict = {"proc": None, "output_file": None}
 
 FREQUENCIES = ["daily", "weekly", "monthly"]
+
+
+# ---------------------------------------------------------------------------
+# /downloads/<filename> — serves any file from the configured output_dir.
+# Path traversal is blocked by abspath comparison.
+# ---------------------------------------------------------------------------
+from flask import abort, send_from_directory  # noqa: E402
+
+@app.server.route("/downloads/<path:filename>")
+def _serve_download(filename: str):
+    safe_dir = os.path.abspath(cfg.output_dir)
+    target   = os.path.abspath(os.path.join(safe_dir, filename))
+    if not target.startswith(safe_dir + os.sep) or not os.path.isfile(target):
+        abort(404)
+    return send_from_directory(safe_dir, filename, as_attachment=True)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -938,6 +954,63 @@ def generate_content(_, selected_rows, table_data, content_type):
                 return base
             n += 1
 
+    def _write_all_formats(base: str, *, kind: str, result: dict, html_str: str,
+                           text_str: str, subject: str, summaries_in: list,
+                           compliance_dict: dict) -> dict:
+        """Write html/txt/json/md/pdf/docx/eml. Returns {ext: abs_path}."""
+        paths = {
+            "html": os.path.join(cfg.output_dir, f"{base}.html"),
+            "txt":  os.path.join(cfg.output_dir, f"{base}.txt"),
+            "md":   os.path.join(cfg.output_dir, f"{base}.md"),
+            "pdf":  os.path.join(cfg.output_dir, f"{base}.pdf"),
+            "docx": os.path.join(cfg.output_dir, f"{base}.docx"),
+            "eml":  os.path.join(cfg.output_dir, f"{base}.eml"),
+            "json": os.path.join(cfg.output_dir, f"{base}.json"),
+        }
+        # Always-on text formats
+        with open(paths["html"], "w") as f: f.write(html_str)
+        with open(paths["txt"],  "w") as f: f.write(text_str)
+        try:
+            with open(paths["md"], "w") as f:
+                f.write(to_markdown(result, kind=kind))
+        except Exception as e:
+            log_warn = f"Markdown export failed: {e}"
+            paths.pop("md", None)
+            print(log_warn)
+        # Binary formats — best-effort, don't break the run if a renderer trips
+        try:
+            with open(paths["pdf"], "wb") as f: f.write(to_pdf(html_str))
+        except Exception as e:
+            print(f"PDF export failed: {e}")
+            paths.pop("pdf", None)
+        try:
+            with open(paths["docx"], "wb") as f: f.write(to_docx(result, kind=kind))
+        except Exception as e:
+            print(f"DOCX export failed: {e}")
+            paths.pop("docx", None)
+        try:
+            with open(paths["eml"], "wb") as f:
+                f.write(to_eml(html_str, text_str, subject))
+        except Exception as e:
+            print(f"EML export failed: {e}")
+            paths.pop("eml", None)
+        # JSON: input + LLM result + compliance summary for replay/audit
+        try:
+            with open(paths["json"], "w") as f:
+                json.dump({
+                    "kind": kind,
+                    "generated_at_utc": datetime.utcnow().isoformat(),
+                    "subject_or_title": subject,
+                    "input_articles": summaries_in,
+                    "result": result,
+                    "compliance_summary": (compliance_dict or {})
+                        .get("final_grade", {}).get("summary", {}),
+                }, f, indent=2, ensure_ascii=False, default=str)
+        except Exception as e:
+            print(f"JSON export failed: {e}")
+            paths.pop("json", None)
+        return paths
+
     if content_type == "newsletter":
         result = generate_newsletter(summaries, client, cfg.anthropic_model)
         if not result:
@@ -946,26 +1019,16 @@ def generate_content(_, selected_rows, table_data, content_type):
         out_text = to_text(result)
         subject  = result.get("subject_line", "UK Personal Finance Digest")
         base = _versioned("newsletter")
-        html_path = os.path.join(cfg.output_dir, f"{base}.html")
-        text_path = os.path.join(cfg.output_dir, f"{base}.txt")
-        json_path = os.path.join(cfg.output_dir, f"{base}.json")
-        # Compliance enforcement loop
+        # Compliance enforcement loop (runs on the HTML before we write any format)
         conn_c = get_connection(cfg.db_path)
         compliance = ensure_compliant(out_html, kind="newsletter",
                                       client=client, model=cfg.anthropic_model,
-                                      conn=conn_c, content_ref=os.path.basename(html_path))
+                                      conn=conn_c, content_ref=f"{base}.html")
         out_html = compliance["final_content"]
-        with open(html_path, "w") as f: f.write(out_html)
-        with open(text_path, "w") as f: f.write(out_text)
-        with open(json_path, "w") as f:
-            json.dump({
-                "kind": "newsletter",
-                "generated_at_utc": datetime.utcnow().isoformat(),
-                "subject": subject,
-                "input_articles": summaries,
-                "result": result,
-                "compliance_summary": (compliance or {}).get("final_grade", {}).get("summary", {}),
-            }, f, indent=2, ensure_ascii=False, default=str)
+        paths = _write_all_formats(base, kind="newsletter", result=result,
+                                   html_str=out_html, text_str=out_text,
+                                   subject=subject, summaries_in=summaries,
+                                   compliance_dict=compliance)
         sections_list = []
         if result.get("edition_label"):
             sections_list.append(dbc.ListGroupItem(f"🗓️ {result['edition_label']}"))
@@ -976,8 +1039,8 @@ def generate_content(_, selected_rows, table_data, content_type):
             dbc.ListGroupItem(f"📌 {s.get('heading','')} — {len(s.get('articles',[]))} article(s)")
             for s in result.get("sections", [])
         ]
-        return _content_preview("✉️ Newsletter Generated", subject, html_path, text_path,
-                                 out_html, sections_list, compliance, json_path=json_path)
+        return _content_preview("✉️ Newsletter Generated", subject,
+                                 paths, out_html, sections_list, compliance)
 
     if content_type == "blog":
         result = generate_blog_post(summaries, client, cfg.anthropic_model)
@@ -987,26 +1050,15 @@ def generate_content(_, selected_rows, table_data, content_type):
         out_text = blog_to_text(result)
         title    = result.get("title", "Blog Post")
         base = _versioned("blog")
-        html_path = os.path.join(cfg.output_dir, f"{base}.html")
-        text_path = os.path.join(cfg.output_dir, f"{base}.txt")
-        json_path = os.path.join(cfg.output_dir, f"{base}.json")
-        # Compliance enforcement loop
         conn_c = get_connection(cfg.db_path)
         compliance = ensure_compliant(out_html, kind="blog",
                                       client=client, model=cfg.anthropic_model,
-                                      conn=conn_c, content_ref=os.path.basename(html_path))
+                                      conn=conn_c, content_ref=f"{base}.html")
         out_html = compliance["final_content"]
-        with open(html_path, "w") as f: f.write(out_html)
-        with open(text_path, "w") as f: f.write(out_text)
-        with open(json_path, "w") as f:
-            json.dump({
-                "kind": "blog",
-                "generated_at_utc": datetime.utcnow().isoformat(),
-                "title": title,
-                "input_articles": summaries,
-                "result": result,
-                "compliance_summary": (compliance or {}).get("final_grade", {}).get("summary", {}),
-            }, f, indent=2, ensure_ascii=False, default=str)
+        paths = _write_all_formats(base, kind="blog", result=result,
+                                   html_str=out_html, text_str=out_text,
+                                   subject=title, summaries_in=summaries,
+                                   compliance_dict=compliance)
         meta_list = []
         rt = result.get("reading_time_minutes")
         if rt:
@@ -1026,8 +1078,8 @@ def generate_content(_, selected_rows, table_data, content_type):
             meta_list.append(dbc.ListGroupItem(f"🔗 {len(result['sources_cited'])} sources cited"))
         if result.get("seo_tags"):
             meta_list.append(dbc.ListGroupItem("🏷️ " + " ".join(f"#{t}" for t in result["seo_tags"])))
-        return _content_preview("📝 Blog Post Generated", title, html_path, text_path,
-                                 out_html, meta_list, compliance, json_path=json_path)
+        return _content_preview("📝 Blog Post Generated", title,
+                                 paths, out_html, meta_list, compliance)
 
     return dbc.Alert("Unknown content type.", color="danger")
 
@@ -1128,25 +1180,55 @@ def _compliance_card(compliance: dict) -> dbc.Card:
     ]), className="shadow-sm mb-3", style={"borderLeft": f"4px solid var(--bs-{color})"})
 
 
-def _content_preview(badge_title: str, content_title: str, html_path: str,
-                     text_path: str, preview_html: str, meta_items: list,
-                     compliance: dict | None = None,
-                     json_path: str | None = None) -> html.Div:
-    saved_paths = [
-        "Saved to ",
-        html.Code(html_path, style={"fontSize": "0.78rem"}),
-        " · ",
-        html.Code(text_path, style={"fontSize": "0.78rem"}),
-    ]
-    if json_path:
-        saved_paths += [" · ", html.Code(json_path, style={"fontSize": "0.78rem"})]
+_FORMAT_META = {
+    "html": ("🌐 HTML",     "primary",  "Open / send as web page"),
+    "pdf":  ("📄 PDF",      "danger",   "Print / share as PDF"),
+    "docx": ("📝 Word",     "info",     "Edit in Microsoft Word"),
+    "md":   ("⌨ Markdown", "dark",     "Paste into a CMS / Substack"),
+    "eml":  ("✉ Email",    "warning",  "Open in Mail / Outlook to send"),
+    "txt":  ("📃 Plain",    "secondary","Plain text fallback"),
+    "json": ("{ } JSON",    "light",    "Raw structured data for replay"),
+}
+# Order shown in the UI
+_FORMAT_ORDER = ["html", "pdf", "docx", "md", "eml", "txt", "json"]
 
+
+def _download_bar(paths: dict) -> html.Div:
+    buttons = []
+    for ext in _FORMAT_ORDER:
+        p = paths.get(ext)
+        if not p:
+            continue
+        label, color, tip = _FORMAT_META[ext]
+        fname = os.path.basename(p)
+        buttons.append(dbc.Button(
+            label, href=f"/downloads/{fname}", external_link=True,
+            download=fname, color=color, size="sm",
+            className="me-2 mb-2", title=tip,
+        ))
+    if not buttons:
+        return html.Div()
+    return html.Div([
+        html.Div("Download as:", className="text-muted small mb-2"),
+        html.Div(buttons),
+    ], className="mb-3")
+
+
+def _content_preview(badge_title: str, content_title: str,
+                     paths: dict, preview_html: str, meta_items: list,
+                     compliance: dict | None = None) -> html.Div:
+    primary = paths.get("html") or next(iter(paths.values()), "")
     return html.Div([
         dbc.Alert([
             html.Strong(f"✅ {badge_title}: {content_title}"),
             html.Br(),
-            html.Small(saved_paths),
+            html.Small([
+                "Saved to ",
+                html.Code(os.path.dirname(primary), style={"fontSize": "0.78rem"}),
+                f"  ({len(paths)} format(s))",
+            ]),
         ], color="success", className="mb-3"),
+        _download_bar(paths),
         _compliance_card(compliance) if compliance else html.Div(),
         dbc.Row([
             dbc.Col([
