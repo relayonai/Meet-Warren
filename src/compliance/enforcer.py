@@ -15,7 +15,6 @@ from typing import List, Optional
 
 import anthropic
 
-from .._json import parse_json_response
 from .rulebook import Rulebook, load_rulebook
 
 log = logging.getLogger(__name__)
@@ -24,10 +23,19 @@ log = logging.getLogger(__name__)
 REVISER_SYSTEM = (
     "You are a senior UK financial-marketing copy editor enforcing the Meet Warren "
     "Marketing Compliance Guidebook. You revise copy to be compliant while preserving "
-    "meaning, structure, and HTML formatting. Return ONLY valid JSON."
+    "meaning, structure, and HTML formatting."
 )
 
-REVISER_TEMPLATE = """Revise the CONTENT below to satisfy every COMPLIANCE SUGGESTION.
+# We use a delimited block format instead of JSON because blog HTML is often
+# 8–15 KB; embedding raw HTML inside a JSON string forces the model to escape
+# every quote/newline, which frequently truncates and produces "Unterminated
+# string" parse errors. Delimiters are robust at any size.
+REVISED_OPEN  = "<<<REVISED_CONTENT_START>>>"
+REVISED_CLOSE = "<<<REVISED_CONTENT_END>>>"
+CHANGES_OPEN  = "<<<CHANGES_JSON_START>>>"
+CHANGES_CLOSE = "<<<CHANGES_JSON_END>>>"
+
+REVISER_TEMPLATE = f"""Revise the CONTENT below to satisfy every COMPLIANCE SUGGESTION.
 
 Constraints:
 - Preserve the existing HTML/Markdown structure (tags, headings, links, lists). Do not strip styling.
@@ -38,18 +46,60 @@ Constraints:
 - If a 'not financial advice' disclaimer is missing, insert it near the foot of the content
   (in the existing footer if there is one).
 
-Return ONLY a JSON object:
-{{
-  "revised_content": "<the full revised content with the same HTML/Markdown structure>",
-  "changes_made":    ["short bullet describing each change", "..."]
-}}
+Output format — VERY IMPORTANT, follow EXACTLY:
+1. First, the full revised content between these markers (raw HTML, no escaping):
+
+{REVISED_OPEN}
+<full revised content goes here>
+{REVISED_CLOSE}
+
+2. Then, a JSON array of short bullets describing each change you made:
+
+{CHANGES_OPEN}
+["change 1", "change 2", "..."]
+{CHANGES_CLOSE}
+
+Do NOT wrap in code fences. Do NOT add commentary outside the markers.
 
 COMPLIANCE SUGGESTIONS (apply ALL):
-{suggestions_json}
+{{suggestions_json}}
 
 CONTENT:
-{content}
+{{content}}
 """
+
+
+def _parse_revised_response(text: str, fallback: str) -> tuple[str, list[str]]:
+    """Parse the delimited LLM response. Returns (revised_content, changes_made)."""
+    revised = fallback
+    changes: list[str] = []
+    try:
+        if REVISED_OPEN in text and REVISED_CLOSE in text:
+            start = text.index(REVISED_OPEN) + len(REVISED_OPEN)
+            end   = text.index(REVISED_CLOSE, start)
+            candidate = text[start:end].strip()
+            # Reject trivially empty / clearly truncated payloads
+            if len(candidate) >= max(64, int(len(fallback) * 0.5)):
+                revised = candidate
+            else:
+                log.warning("Revised content looked truncated (%d chars vs %d original); "
+                            "keeping original.", len(candidate), len(fallback))
+        else:
+            log.warning("Reviser output missing content markers; keeping original.")
+    except Exception as e:
+        log.warning("Could not extract revised content: %s", e)
+
+    try:
+        if CHANGES_OPEN in text and CHANGES_CLOSE in text:
+            cs = text.index(CHANGES_OPEN) + len(CHANGES_OPEN)
+            ce = text.index(CHANGES_CLOSE, cs)
+            arr = json.loads(text[cs:ce].strip())
+            if isinstance(arr, list):
+                changes = [str(c) for c in arr]
+    except Exception as e:
+        log.warning("Could not parse changes_made JSON: %s", e)
+
+    return revised, changes
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +163,10 @@ def _llm_revise(
 ) -> tuple[str, list[str]]:
     if not suggestions:
         return content, []
+    # Size the output budget generously: revised content is roughly the same
+    # size as the input, plus the changes JSON. 1 token ≈ ~3.5 chars of HTML,
+    # so allocate ~content_len/3 + 2000 buffer, capped to model's max.
+    max_tok = min(32000, max(8000, len(content) // 3 + 2000))
     prompt = REVISER_TEMPLATE.format(
         suggestions_json=json.dumps(suggestions, indent=2, ensure_ascii=False),
         content=content,
@@ -120,19 +174,15 @@ def _llm_revise(
     try:
         resp = client.messages.create(
             model=model,
-            max_tokens=8000,
+            max_tokens=max_tok,
             system=REVISER_SYSTEM,
             messages=[{"role": "user", "content": prompt}],
         )
         text = resp.content[0].text
-        data = parse_json_response(text)
     except Exception as exc:
-        log.error("LLM revision failed: %s", exc)
+        log.error("LLM revision call failed: %s", exc)
         return content, []
-    revised = data.get("revised_content") or content
-    changes = data.get("changes_made") or []
-    if not isinstance(changes, list):
-        changes = [str(changes)]
+    revised, changes = _parse_revised_response(text, fallback=content)
     return revised, changes
 
 

@@ -997,20 +997,70 @@ def _build_summaries(rows_df, raw_by_id) -> list[dict]:
     return summaries
 
 
+def _versioned_basename(prefix: str) -> str:
+    """e.g. 'newsletter-2026-04-25-v3' — picks next free version under output_dir."""
+    today_str = datetime.utcnow().strftime("%Y-%m-%d")
+    n = 1
+    while True:
+        base = f"{prefix}-{today_str}-v{n}"
+        if not os.path.exists(os.path.join(cfg.output_dir, f"{base}.html")):
+            return base
+        n += 1
+
+
+def _write_all_formats(base: str, *, kind: str, result: dict, html_str: str,
+                       text_str: str, subject: str, summaries_in: list,
+                       compliance_dict: dict) -> dict:
+    """Write html/txt/json/md/pdf/docx/eml in parallel. Returns {ext: abs_path}."""
+    paths = {
+        "html": os.path.join(cfg.output_dir, f"{base}.html"),
+        "txt":  os.path.join(cfg.output_dir, f"{base}.txt"),
+        "md":   os.path.join(cfg.output_dir, f"{base}.md"),
+        "pdf":  os.path.join(cfg.output_dir, f"{base}.pdf"),
+        "docx": os.path.join(cfg.output_dir, f"{base}.docx"),
+        "eml":  os.path.join(cfg.output_dir, f"{base}.eml"),
+        "json": os.path.join(cfg.output_dir, f"{base}.json"),
+    }
+
+    def _write_html():  open(paths["html"], "w").write(html_str)
+    def _write_txt():   open(paths["txt"],  "w").write(text_str)
+    def _write_md():    open(paths["md"],   "w").write(to_markdown(result, kind=kind))
+    def _write_pdf():   open(paths["pdf"], "wb").write(to_pdf(html_str))
+    def _write_docx():  open(paths["docx"],"wb").write(to_docx(result, kind=kind))
+    def _write_eml():   open(paths["eml"], "wb").write(to_eml(html_str, text_str, subject))
+    def _write_json():
+        with open(paths["json"], "w") as f:
+            json.dump({
+                "kind": kind,
+                "generated_at_utc": datetime.utcnow().isoformat(),
+                "subject_or_title": subject,
+                "input_articles": summaries_in,
+                "result": result,
+                "compliance_summary": (compliance_dict or {})
+                    .get("final_grade", {}).get("summary", {}),
+            }, f, indent=2, ensure_ascii=False, default=str)
+
+    jobs = {
+        "html": _write_html, "txt": _write_txt,  "md":   _write_md,
+        "pdf":  _write_pdf,  "docx": _write_docx, "eml":  _write_eml,
+        "json": _write_json,
+    }
+    with ThreadPoolExecutor(max_workers=len(jobs)) as ex:
+        futs = {ex.submit(fn): ext for ext, fn in jobs.items()}
+        for fut, ext in futs.items():
+            try:
+                fut.result()
+            except Exception as e:
+                print(f"{ext.upper()} export failed: {e}")
+                paths.pop(ext, None)
+    return paths
+
+
 def _run_generation_job(job_id: str, summaries: list, content_type: str) -> None:
     """Heavy work: LLM draft → compliance → multi-format export. Runs in a thread."""
     try:
         client = build_anthropic_client(cfg)
         os.makedirs(cfg.output_dir, exist_ok=True)
-        today_str = datetime.utcnow().strftime("%Y-%m-%d")
-
-        def _versioned(prefix: str) -> str:
-            n = 1
-            while True:
-                base = f"{prefix}-{today_str}-v{n}"
-                if not os.path.exists(os.path.join(cfg.output_dir, f"{base}.html")):
-                    return base
-                n += 1
 
         _set_stage(job_id, "draft", sub=f"{content_type} from {len(summaries)} article(s)")
         if content_type == "newsletter":
@@ -1019,7 +1069,7 @@ def _run_generation_job(job_id: str, summaries: list, content_type: str) -> None
                 raise RuntimeError("Newsletter generation returned no content.")
             out_html, out_text = to_html(result), to_text(result)
             subject = result.get("subject_line", "UK Personal Finance Digest")
-            base = _versioned("newsletter")
+            base = _versioned_basename("newsletter")
             kind = "newsletter"
         elif content_type == "blog":
             result = generate_blog_post(summaries, client, cfg.anthropic_model)
@@ -1027,7 +1077,7 @@ def _run_generation_job(job_id: str, summaries: list, content_type: str) -> None
                 raise RuntimeError("Blog post generation returned no content.")
             out_html, out_text = blog_to_html(result), blog_to_text(result)
             subject = result.get("title", "Blog Post")
-            base = _versioned("blog")
+            base = _versioned_basename("blog")
             kind = "blog"
         else:
             raise RuntimeError(f"Unknown content type: {content_type}")
