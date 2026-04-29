@@ -1,0 +1,418 @@
+/* ============================================================
+   Warren Workflow · Brand stylesheet
+   Auto-loaded by Dash from /assets. Tokens in :root so any
+   colour can be retuned in one place.
+   ============================================================ */
+
+:root {
+  /* Brand palette */
+  --warren-navy:        #0b2545;
+  --warren-navy-2:      #13335c;
+  --warren-gold:        #c9a227;
+  --warren-gold-soft:   #fdf6e3;
+  --warren-ink:         #1a1f36;
+  --warren-muted:       #5a6478;
+  --warren-soft:        #f6f8fb;
+  --warren-bg:          #f3f5f9;
+  --warren-card:        #ffffff;
+  --warren-border:      #e6e9ef;
+  --warren-success:     #2d7a4d;
+  --warren-warning:     #c9870e;
+  --warren-danger:      #b13b3b;
+  --warren-info:        #1f6f9c;
+
+  /* Typography */
+  --font-body:    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                  "Helvetica Neue", Arial, sans-serif;
+  --font-display: Georgia, "Iowan Old Style", "Times New Roman", Cambria, serif;
+
+  /* Shape */
+  --radius-sm: 6px;
+  --radius:    10px;
+  --radius-lg: 14px;
+  --shadow-sm: 0 1px 2px rgba(11,37,69,0.05);
+  --shadow:    0 2px 6px rgba(11,37,69,0.06), 0 1px 2px rgba(11,37,69,0.04);
+  --shadow-lg: 0 8px 24px rgba(11,37,69,0.10);
+}
+
+/* -------------- Bootstrap variable overrides ----------------- */
+:root, [data-bs-theme="light"] {
+  --bs-primary:     var(--warren-navy);
+  --bs-primary-rgb: 11, 37, 69;
+  --bs-success:     var(--warren-success);
+  --bs-info:        var(--warren-info);
+  --bs-warning:     var(--warren-warning);
+  --bs-danger:      var(--warren-danger);
+  --bs-body-color:  var(--warren-ink);
+  --bs-body-bg:     var(--warren-bg);
+  --bs-border-color: var(--warren-border);
+  --bs-link-color:  var(--warren-info);
+  --bs-link-hover-color: var(--warren-navy);
+}
+
+/* -------------- Global base --------------------------------- */
+body {
+  background: var(--warren-bg) !important;
+  color: var(--warren-ink) !important;
+  font-family: var(--font-body) !important;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3, h4, h5, h6,
+.h1, .h2, .h3, .h4, .h5, .h6 {
+  color: var(--warren-navy);
+  letter-spacing: -0.01em;
+}
+
+/* -------------- Sidebar ------------------------------------- */
+.warren-sidebar {
+  background: linear-gradient(180deg, #ffffff 0%, #fafbfd 100%) !important;
+  border-right: 1px solid var(--warren-border) !important;
+  box-shadow: var(--shadow-sm);
+}
+.warren-brand {
+  padding: 28px 18px 22px;
+  border-bottom: 1px solid var(--warren-border);
+  text-align: left;
+}
+.warren-brand-mark {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.warren-brand-logo {
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+  background: var(--warren-navy);
+  color: var(--warren-gold);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 19px;
+  letter-spacing: -0.02em;
+}
+.warren-brand-text {
+  font-family: var(--font-display);
+  color: var(--warren-navy);
+  font-weight: 700;
+  font-size: 17px;
+  line-height: 1;
+  letter-spacing: -0.01em;
+}
+.warren-brand-sub {
+  color: var(--warren-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  margin-top: 4px;
+}
+.warren-sidebar .nav-link.sidebar-link {
+  color: var(--warren-ink) !important;
+  border-radius: var(--radius-sm) !important;
+  padding: 10px 12px !important;
+  margin: 2px 0 !important;
+  font-size: 14px;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.warren-sidebar .nav-link.sidebar-link:hover {
+  background: var(--warren-soft) !important;
+  color: var(--warren-navy) !important;
+}
+.warren-sidebar .nav-link.sidebar-link.active {
+  background: var(--warren-navy) !important;
+  color: #ffffff !important;
+  box-shadow: var(--shadow-sm);
+}
+.warren-sidebar .nav-link.sidebar-link.active::before {
+  content: "";
+  display: inline-block;
+  width: 3px;
+  height: 16px;
+  background: var(--warren-gold);
+  margin-right: 8px;
+  border-radius: 2px;
+  vertical-align: middle;
+}
+.warren-sidebar-footer {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: 14px 18px;
+  border-top: 1px solid var(--warren-border);
+  font-size: 11px;
+  color: var(--warren-muted);
+  letter-spacing: 0.04em;
+}
+
+/* -------------- Cards --------------------------------------- */
+.card {
+  border: 1px solid var(--warren-border) !important;
+  border-radius: var(--radius) !important;
+  box-shadow: var(--shadow-sm) !important;
+  background: var(--warren-card) !important;
+}
+.card .card-body { padding: 1.1rem 1.25rem; }
+
+/* Page-level headings */
+.page-title {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+.page-title h3 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 28px;
+  letter-spacing: -0.02em;
+  color: var(--warren-navy);
+  margin: 0;
+}
+.page-title .accent {
+  width: 6px;
+  height: 22px;
+  background: var(--warren-gold);
+  border-radius: 2px;
+  display: inline-block;
+}
+.page-subtitle {
+  color: var(--warren-muted);
+  font-size: 14px;
+  margin: 4px 0 22px;
+}
+
+/* Section headings inside cards */
+.section-eyebrow {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--warren-muted);
+  margin-bottom: 6px;
+}
+
+/* -------------- Buttons ------------------------------------- */
+.btn {
+  border-radius: var(--radius-sm) !important;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.btn-primary {
+  background: var(--warren-navy) !important;
+  border-color: var(--warren-navy) !important;
+}
+.btn-primary:hover {
+  background: var(--warren-navy-2) !important;
+  border-color: var(--warren-navy-2) !important;
+}
+.btn-warning {
+  background: var(--warren-gold) !important;
+  border-color: var(--warren-gold) !important;
+  color: #1a1500 !important;
+}
+.btn-success {
+  background: var(--warren-success) !important;
+  border-color: var(--warren-success) !important;
+}
+.btn-outline-primary {
+  color: var(--warren-navy) !important;
+  border-color: var(--warren-navy) !important;
+}
+.btn-outline-primary:hover {
+  background: var(--warren-navy) !important;
+  color: #ffffff !important;
+}
+
+/* -------------- Form controls + tabs ------------------------- */
+.form-control, .form-select {
+  border-radius: var(--radius-sm) !important;
+  border-color: var(--warren-border) !important;
+  font-size: 14px;
+}
+.form-control:focus, .form-select:focus {
+  border-color: var(--warren-navy) !important;
+  box-shadow: 0 0 0 3px rgba(11,37,69,0.10) !important;
+}
+.nav-tabs .nav-link {
+  color: var(--warren-muted) !important;
+  border: none !important;
+  font-weight: 600;
+  font-size: 14px;
+  padding: 10px 18px !important;
+}
+.nav-tabs .nav-link.active {
+  color: var(--warren-navy) !important;
+  background: transparent !important;
+  border-bottom: 3px solid var(--warren-gold) !important;
+}
+
+/* -------------- Badges -------------------------------------- */
+.badge {
+  border-radius: var(--radius-sm) !important;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+/* -------------- Tables (DataTable) -------------------------- */
+.dash-table-container .dash-spreadsheet-container .dash-spreadsheet-inner table {
+  font-family: var(--font-body) !important;
+}
+.dash-table-container .dash-header {
+  background: var(--warren-navy) !important;
+  color: #ffffff !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  font-size: 11px !important;
+}
+.dash-cell { font-size: 13px !important; }
+
+/* -------------- Stat cards (overview) ----------------------- */
+.warren-stat-card {
+  border-left: 4px solid var(--warren-gold);
+  border-radius: var(--radius);
+  background: #ffffff;
+  padding: 18px 20px;
+  box-shadow: var(--shadow-sm);
+  height: 100%;
+}
+.warren-stat-card .label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--warren-muted);
+  margin-bottom: 6px;
+}
+.warren-stat-card .value {
+  font-family: var(--font-display);
+  font-size: 32px;
+  font-weight: 700;
+  color: var(--warren-navy);
+  line-height: 1;
+}
+
+/* -------------- Two-pane Create layout ---------------------- */
+.create-shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(360px, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+.create-pane-left, .create-pane-right { min-width: 0; }
+.create-pane-right {
+  position: sticky;
+  top: 20px;
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+}
+
+/* Compact filter strip in the left pane */
+.create-filter-strip {
+  background: #ffffff;
+  border: 1px solid var(--warren-border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin-bottom: 12px;
+  box-shadow: var(--shadow-sm);
+}
+.create-filter-strip .form-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--warren-muted);
+  margin-bottom: 4px;
+}
+
+/* Selectable content type tiles */
+.type-tile {
+  cursor: pointer;
+  border: 2px solid transparent;
+  border-radius: var(--radius);
+  background: #ffffff;
+  transition: border-color 0.15s ease, transform 0.05s ease, box-shadow 0.15s ease;
+}
+.type-tile:hover {
+  border-color: var(--warren-border);
+  box-shadow: var(--shadow);
+}
+.type-tile.selected {
+  border-color: var(--warren-navy) !important;
+  background: var(--warren-soft) !important;
+  box-shadow: 0 0 0 3px rgba(11,37,69,0.08), var(--shadow);
+}
+.type-tile .icon { font-size: 1.8rem; }
+
+/* Sticky generate bar inside right pane */
+.generate-bar {
+  background: var(--warren-navy);
+  color: #ffffff;
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  box-shadow: var(--shadow);
+  margin-top: 4px;
+}
+.generate-bar .btn {
+  width: 100%;
+  background: var(--warren-gold) !important;
+  border-color: var(--warren-gold) !important;
+  color: #1a1500 !important;
+  font-weight: 700;
+  font-size: 15px;
+  padding: 12px;
+}
+.generate-bar .btn:disabled {
+  background: rgba(255,255,255,0.16) !important;
+  border-color: rgba(255,255,255,0.16) !important;
+  color: rgba(255,255,255,0.6) !important;
+}
+.generate-bar .hint {
+  font-size: 12px;
+  color: rgba(255,255,255,0.7);
+  margin-top: 8px;
+  text-align: center;
+}
+
+/* Selection counter chip on the right pane */
+.selection-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--warren-gold-soft);
+  color: var(--warren-navy);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+/* DataTable wrapper inside left pane gets a card frame */
+.create-table-wrap {
+  background: #ffffff;
+  border: 1px solid var(--warren-border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+  padding: 6px;
+}
+
+/* Responsive: collapse to single column on narrow screens */
+@media (max-width: 1100px) {
+  .create-shell { grid-template-columns: 1fr; }
+  .create-pane-right { position: static; max-height: none; }
+}
+
+/* -------------- Nav pills (used inside Database tabs) ------- */
+.nav-pills .nav-link {
+  border-radius: var(--radius-sm) !important;
+  font-weight: 600;
+}
+.nav-pills .nav-link.active {
+  background: var(--warren-navy) !important;
+  color: #ffffff !important;
+}

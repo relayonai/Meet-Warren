@@ -104,14 +104,25 @@ def _get_df() -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def _stat_card(title: str, value: str, color: str = "primary") -> dbc.Card:
-    return dbc.Card(
-        dbc.CardBody([
-            html.P(title, className="text-muted mb-1", style={"fontSize": "0.82rem"}),
-            html.H3(value, className=f"text-{color} mb-0 fw-bold"),
-        ]),
-        className="shadow-sm h-100",
-    )
+def _stat_card(title: str, value: str, color: str = "primary") -> html.Div:
+    """Branded stat tile (replaces dbc.Card variant)."""
+    return html.Div([
+        html.Div(title, className="label"),
+        html.Div(value, className="value"),
+    ], className="warren-stat-card")
+
+
+def _page_header(title: str, subtitle: str | None = None) -> html.Div:
+    """Consistent page heading with the gold accent bar."""
+    bits = [
+        html.Div([
+            html.Span(className="accent"),
+            html.H3(title),
+        ], className="page-title"),
+    ]
+    if subtitle:
+        bits.append(html.P(subtitle, className="page-subtitle"))
+    return html.Div(bits)
 
 
 def _running_badge():
@@ -127,39 +138,43 @@ def _idle_badge():
 
 SIDEBAR = html.Div([
     html.Div([
-        html.Span("🇬🇧", style={"fontSize": "2rem"}),
-        html.H5("Warren Workflow", className="fw-bold mb-0 mt-1"),
-        html.P("UK Personal Finance", className="text-muted small mb-0"),
-    ], className="text-center py-4 border-bottom"),
+        html.Div([
+            html.Span("W", className="warren-brand-logo"),
+            html.Div([
+                html.Div("Warren", className="warren-brand-text"),
+                html.Div("Workflow", className="warren-brand-sub"),
+            ]),
+        ], className="warren-brand-mark"),
+    ], className="warren-brand"),
 
     dbc.Nav([
         dbc.NavLink(
-            [html.Span("🗄️", className="me-2"), "Database"],
+            [html.Span("🗄", className="me-2"), "Database"],
             href="/",
             active="exact",
             className="sidebar-link fw-semibold",
         ),
         dbc.NavLink(
-            [html.Span("✍️", className="me-2"), "Create New Content"],
+            [html.Span("✍", className="me-2"), "Create"],
             href="/create",
             active="exact",
             className="sidebar-link fw-semibold",
         ),
         dbc.NavLink(
-            [html.Span("🛡️", className="me-2"), "Compliance"],
+            [html.Span("🛡", className="me-2"), "Compliance"],
             href="/compliance",
             active="exact",
             className="sidebar-link fw-semibold",
         ),
     ], vertical=True, pills=True, className="px-3 pt-3"),
-], style={
+
+    html.Div("UK Personal Finance · v1", className="warren-sidebar-footer"),
+], className="warren-sidebar", style={
     "position": "fixed",
     "top": 0,
     "left": 0,
     "bottom": 0,
-    "width": "220px",
-    "backgroundColor": "#ffffff",
-    "borderRight": "1px solid #dee2e6",
+    "width": "230px",
     "zIndex": 100,
     "overflowY": "auto",
 })
@@ -170,9 +185,8 @@ app.layout = html.Div([
     html.Div(
         id="page-content",
         style={
-            "marginLeft": "220px",
-            "padding": "28px 32px",
-            "backgroundColor": "#f8f9fa",
+            "marginLeft": "230px",
+            "padding": "28px 36px 60px",
             "minHeight": "100vh",
         },
     ),
@@ -201,11 +215,12 @@ def route(pathname):
 
 def _database_page():
     return html.Div([
-        html.H3("Database", className="fw-bold mb-4"),
+        _page_header("Database",
+                     "Articles fetched from RSS, GOV.UK and HTTP sources, deduped + scored."),
         dbc.Tabs([
-            dbc.Tab(label="📊  Overview",        tab_id="db-overview"),
-            dbc.Tab(label="📰  Article Browser", tab_id="db-browser"),
-            dbc.Tab(label="🔄  Scrape",          tab_id="db-scrape"),
+            dbc.Tab(label="Overview",        tab_id="db-overview"),
+            dbc.Tab(label="Article Browser", tab_id="db-browser"),
+            dbc.Tab(label="Scrape",          tab_id="db-scrape"),
         ], id="db-tabs", active_tab="db-overview", className="mb-4"),
         html.Div(id="db-tab-content"),
     ])
@@ -654,66 +669,60 @@ def _create_page():
     sources = sorted(df["source"].unique().tolist())   if not df.empty else []
     cats    = sorted(df["category"].unique().tolist()) if not df.empty else []
 
-    return html.Div([
-        html.H3("Create New Content", className="fw-bold mb-1"),
-        html.P("Select articles from the database, choose a content type, then generate.",
-               className="text-muted mb-4"),
-
-        # --- Step 1: Filter + select articles ---
-        dbc.Card(dbc.CardBody([
-            html.H6("Step 1 — Select Articles", className="fw-bold text-primary mb-3"),
+    # ------------ LEFT PANE: filters + article picker ------------
+    left_pane = html.Div([
+        html.Div([
+            html.Div("Step 1 · Filter & pick articles", className="section-eyebrow"),
             dbc.Row([
                 dbc.Col([
                     dbc.Label("Source"),
-                    dcc.Dropdown(id="cr-source", options=[{"label": s, "value": s} for s in sources],
+                    dcc.Dropdown(id="cr-source",
+                                 options=[{"label": s, "value": s} for s in sources],
                                  placeholder="All sources", multi=True, clearable=True),
-                ], md=3),
+                ], md=4),
                 dbc.Col([
                     dbc.Label("Category"),
-                    dcc.Dropdown(id="cr-category", options=[{"label": c.title(), "value": c} for c in cats],
+                    dcc.Dropdown(id="cr-category",
+                                 options=[{"label": c.title(), "value": c} for c in cats],
                                  placeholder="All categories", multi=True, clearable=True),
-                ], md=3),
+                ], md=4),
                 dbc.Col([
                     dbc.Label([
-                        "Time Frame ",
+                        "Time frame ",
                         html.Sup("ⓘ", id="cr-timeframe-info",
                                  style={"fontSize": "0.7em", "opacity": "0.6", "cursor": "help"}),
                     ]),
                     dcc.Dropdown(id="cr-timeframe",
                                  options=[
-                                     {"label": "Last 24 hours (Daily)",  "value": "daily"},
-                                     {"label": "Last 7 days (Weekly)",   "value": "weekly"},
-                                     {"label": "Last 30 days (Monthly)", "value": "monthly"},
-                                     {"label": "All time",               "value": "all"},
+                                     {"label": "Last 24h",  "value": "daily"},
+                                     {"label": "Last 7d",   "value": "weekly"},
+                                     {"label": "Last 30d",  "value": "monthly"},
+                                     {"label": "All time",  "value": "all"},
                                  ],
                                  value="weekly", clearable=False),
-                    dbc.Tooltip("Restricts the candidate pool to articles published within this window. "
-                                "Pick 'Weekly' for a weekly newsletter so two-week-old stories are excluded.",
+                    dbc.Tooltip("Restricts the candidate pool to articles published within this window.",
                                 target="cr-timeframe-info", placement="top"),
-                ], md=3),
+                ], md=4),
+            ], className="g-3"),
+            dbc.Row([
                 dbc.Col([
-                    dbc.Label("Min Score"),
+                    dbc.Label("Min relevance score"),
                     dcc.Slider(id="cr-score", min=1, max=10, step=1, value=6,
                                marks={i: str(i) for i in range(1, 11)},
                                tooltip={"always_visible": False}),
-                ], md=3),
-            ], className="g-3 mb-3"),
-
+                ], md=12),
+            ], className="g-3 mt-1"),
             dbc.Row([
                 dbc.Col([
-                    dbc.Button(["Select All ", html.Sup("ⓘ", style={"fontSize": "0.65em", "opacity": "0.7"})],
-                               id="cr-select-all", color="outline-primary", size="sm", className="me-2"),
-                    dbc.Tooltip("Selects every article currently visible after applying your filters.",
-                                target="cr-select-all", placement="top"),
+                    dbc.Button("Select all (filtered)", id="cr-select-all",
+                               color="outline-primary", size="sm", className="me-2"),
+                    dbc.Button("Clear selection", id="cr-clear",
+                               color="outline-secondary", size="sm"),
+                ], md=12, className="mt-3"),
+            ]),
+        ], className="create-filter-strip"),
 
-                    dbc.Button(["Clear ", html.Sup("ⓘ", style={"fontSize": "0.65em", "opacity": "0.7"})],
-                               id="cr-clear", color="outline-secondary", size="sm"),
-                    dbc.Tooltip("Deselects all articles without changing your filters.",
-                                target="cr-clear", placement="top"),
-                ], md=6),
-                dbc.Col(html.Div(id="cr-selected-badge", className="text-end"), md=6),
-            ], className="mb-2"),
-
+        html.Div(
             dash_table.DataTable(
                 id="cr-table",
                 columns=[
@@ -721,84 +730,91 @@ def _create_page():
                     {"name": "Title",    "id": "title"},
                     {"name": "Source",   "id": "source"},
                     {"name": "Category", "id": "category"},
-                    {"name": "Freq",     "id": "scrape_frequency"},
                     {"name": "Score",    "id": "relevance_score"},
                     {"name": "Date",     "id": "published_at"},
                 ],
                 data=[],
                 row_selectable="multi",
                 selected_rows=[],
-                page_size=12,
+                page_size=14,
                 sort_action="native",
+                style_as_list_view=True,
                 style_table={"overflowX": "auto"},
-                style_header={"backgroundColor": "#2196F3", "color": "white", "fontWeight": "bold"},
                 style_data_conditional=[
-                    {"if": {"row_index": "odd"}, "backgroundColor": "#f9f9f9"},
-                    {"if": {"state": "selected"}, "backgroundColor": "#e8f5e9", "border": "1px solid #43a047"},
+                    {"if": {"row_index": "odd"},
+                     "backgroundColor": "rgba(11,37,69,0.02)"},
+                    {"if": {"state": "selected"},
+                     "backgroundColor": "rgba(201,162,39,0.16)",
+                     "border": "1px solid rgba(11,37,69,0.18)"},
                 ],
-                style_cell={"textAlign": "left", "padding": "8px 10px", "fontSize": "13px"},
+                style_cell={"textAlign": "left", "padding": "10px 12px", "fontSize": "13px",
+                            "fontFamily": "var(--font-body)", "color": "var(--warren-ink)"},
+                style_header={"fontFamily": "var(--font-body)"},
                 style_cell_conditional=[
-                    {"if": {"column_id": "title"},  "maxWidth": "360px", "overflow": "hidden", "textOverflow": "ellipsis"},
+                    {"if": {"column_id": "title"},  "maxWidth": "380px",
+                     "overflow": "hidden", "textOverflow": "ellipsis", "fontWeight": "600"},
                     {"if": {"column_id": "select_hint"}, "width": "10px"},
                 ],
             ),
-        ]), className="mb-3 shadow-sm"),
+            className="create-table-wrap",
+        ),
+    ], className="create-pane-left")
 
-        # --- Step 2: Content type ---
+    # ------------ RIGHT PANE: type + sticky generate + output ------------
+    right_pane = html.Div([
+        # Selection summary chip
+        html.Div(html.Div(id="cr-selected-badge"), className="mb-2"),
+
+        # Step 2 — content type tiles
         dbc.Card(dbc.CardBody([
-            html.H6("Step 2 — Choose Content Type", className="fw-bold text-primary mb-3"),
-            dbc.Row([
-                dbc.Col([
-                    html.Div(
-                        dbc.Card(dbc.CardBody([
-                            html.H4("✉️", className="text-center mb-1", style={"fontSize": "2rem"}),
-                            html.H6(["Newsletter ", html.Sup("ⓘ", style={"fontSize": "0.65em", "opacity": "0.7"})],
-                                    className="text-center fw-bold"),
-                            html.P("A structured digest with sections, editor commentary, and a closing.",
-                                   className="text-muted small text-center mb-0"),
-                        ]), className="h-100"),
-                        id="cr-type-newsletter",
-                        n_clicks=0,
-                        style={"cursor": "pointer", "border": "2px solid transparent",
-                               "borderRadius": "6px", "height": "100%"},
-                    ),
-                    dbc.Tooltip("Generates a structured email digest with themed sections, article summaries, editor commentary, and a closing note.", target="cr-type-newsletter", placement="bottom"),
-                ], md=4),
-                dbc.Col([
-                    html.Div(
-                        dbc.Card(dbc.CardBody([
-                            html.H4("📝", className="text-center mb-1", style={"fontSize": "2rem"}),
-                            html.H6(["Blog Post ", html.Sup("ⓘ", style={"fontSize": "0.65em", "opacity": "0.7"})],
-                                    className="text-center fw-bold"),
-                            html.P("A long-form article with intro, analysed sections, conclusion, and SEO tags.",
-                                   className="text-muted small text-center mb-0"),
-                        ]), className="h-100"),
-                        id="cr-type-blog",
-                        n_clicks=0,
-                        style={"cursor": "pointer", "border": "2px solid transparent",
-                               "borderRadius": "6px", "height": "100%"},
-                    ),
-                    dbc.Tooltip("Generates a long-form UK personal finance blog post with an intro, analysed sections, conclusion, and SEO tags for publishing.", target="cr-type-blog", placement="bottom"),
-                ], md=4),
-            ], className="g-3"),
+            html.Div("Step 2 · Content type", className="section-eyebrow"),
+            html.Div([
+                html.Div([
+                    html.Div([
+                        html.Div("✉", className="icon"),
+                        html.Div("Newsletter", className="fw-bold mt-1"),
+                        html.Div("Email digest with sections + editor pick.",
+                                 className="text-muted small mt-1"),
+                    ], style={"padding": "16px 14px", "textAlign": "center"}),
+                ], id="cr-type-newsletter", n_clicks=0,
+                   className="type-tile"),
+                html.Div(style={"height": "10px"}),
+                html.Div([
+                    html.Div([
+                        html.Div("📝", className="icon"),
+                        html.Div("Blog Post", className="fw-bold mt-1"),
+                        html.Div("Long-form analysis with TL;DR + FAQ.",
+                                 className="text-muted small mt-1"),
+                    ], style={"padding": "16px 14px", "textAlign": "center"}),
+                ], id="cr-type-blog", n_clicks=0,
+                   className="type-tile"),
+            ]),
             dcc.Store(id="cr-content-type", data=None),
-        ]), className="mb-3 shadow-sm"),
+        ]), className="mb-3"),
 
-        # --- Step 3: Generate ---
-        dbc.Card(dbc.CardBody([
-            html.H6("Step 3 — Generate", className="fw-bold text-primary mb-3"),
-            dbc.Button(["⚡  Generate Content ", html.Sup("ⓘ", style={"fontSize": "0.65em", "opacity": "0.7"})],
-                       id="cr-generate-btn", color="success", size="lg", disabled=True),
-            dbc.Tooltip("Sends your selected articles to Claude to generate your chosen content type. This may take 10–30 seconds depending on article count.", target="cr-generate-btn", placement="top"),
-            html.P(id="cr-generate-hint", className="text-muted small mt-2 mb-0",
-                   children="Select at least one article and a content type first."),
-        ]), className="mb-3 shadow-sm"),
+        # Step 3 — sticky generate bar
+        html.Div([
+            html.Div("Step 3 · Generate", className="section-eyebrow",
+                     style={"color": "rgba(255,255,255,0.7)"}),
+            dbc.Button("⚡  Generate", id="cr-generate-btn", disabled=True),
+            html.Div(id="cr-generate-hint", className="hint",
+                     children="Pick at least one article and a content type."),
+            dbc.Tooltip("Runs the LLM draft → compliance check → multi-format export. "
+                        "Takes 30–90 seconds.",
+                        target="cr-generate-btn", placement="top"),
+        ], className="generate-bar"),
 
-        # --- Output ---
-        # Hidden state for the background generation job:
+        # Job state + polling for progress
         dcc.Store(id="cr-job-id"),
         dcc.Interval(id="cr-job-poll", interval=600, disabled=True),
-        html.Div(id="cr-output"),
+    ], className="create-pane-right")
+
+    return html.Div([
+        _page_header("Create",
+                     "Filter articles, pick a format, ship a polished newsletter or blog."),
+        html.Div([left_pane, right_pane], className="create-shell"),
+        # Output sits below the two-pane shell so previews can use the full width
+        html.Div(id="cr-output", className="mt-4"),
     ])
 
 
@@ -859,13 +875,17 @@ def clear_selection(_):
 )
 def update_selected_badge(selected):
     n = len(selected or [])
-    color = "success" if n > 0 else "secondary"
-    return dbc.Badge(f"{n} article{'s' if n != 1 else ''} selected", color=color, className="fs-6 p-2")
+    if n == 0:
+        return html.Span("No articles selected", className="text-muted small")
+    return html.Span([
+        html.Span("●", className="me-1"),
+        f"{n} article{'s' if n != 1 else ''} selected",
+    ], className="selection-chip")
 
 
 @app.callback(
-    Output("cr-type-newsletter", "style"),
-    Output("cr-type-blog",       "style"),
+    Output("cr-type-newsletter", "className"),
+    Output("cr-type-blog",       "className"),
     Output("cr-content-type",    "data"),
     Input("cr-type-newsletter",  "n_clicks"),
     Input("cr-type-blog",        "n_clicks"),
@@ -873,14 +893,12 @@ def update_selected_badge(selected):
     prevent_initial_call=True,
 )
 def select_content_type(nl_clicks, blog_clicks, current):
-    selected_style   = {"cursor": "pointer", "border": "2px solid #43a047", "backgroundColor": "#f1f8e9"}
-    unselected_style = {"cursor": "pointer", "border": "2px solid transparent"}
     trigger = ctx.triggered_id
     if trigger == "cr-type-newsletter":
-        return selected_style, unselected_style, "newsletter"
+        return "type-tile selected", "type-tile", "newsletter"
     if trigger == "cr-type-blog":
-        return unselected_style, selected_style, "blog"
-    return unselected_style, unselected_style, None
+        return "type-tile", "type-tile selected", "blog"
+    return "type-tile", "type-tile", None
 
 
 @app.callback(
