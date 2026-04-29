@@ -18,7 +18,7 @@ import pandas as pd
 import plotly.express as px
 from dash import Input, Output, State, ctx, dash_table, dcc, html, no_update
 
-from src.answer_machine import draft_reply, load_knowledge_base
+from src.answer_machine import append_exemplar, draft_reply, load_knowledge_base
 from src.blog_generator import generate_blog_post, blog_to_html, blog_to_text
 from src.blog_quality import quick_score as blog_quick_score
 from src.compliance import ensure_compliant, load_rulebook
@@ -1821,6 +1821,9 @@ def _answer_machine_page():
                      "in the FAQs, brand narrative, and 30+ past replies."),
         (dbc.Alert(f"Knowledge base error: {kb_error}", color="danger")
          if kb_error else html.Div()),
+        # Persists the in-flight draft (incoming message + metadata) across
+        # callbacks so the Approve button can write the right exemplar.
+        dcc.Store(id="am-current-draft", data=None),
         html.Div([left_pane, right_pane], className="create-shell"),
     ])
 
@@ -1880,11 +1883,11 @@ def _am_render_reply(out: dict, platform: str, is_dm: bool) -> html.Div:
                    else "")
 
     return html.Div([
-        # Reply card with copy button
+        # Reply card with editable textarea + copy + approve
         dbc.Card(dbc.CardBody([
             dbc.Row([
                 dbc.Col([
-                    html.Div("Drafted reply", className="section-eyebrow"),
+                    html.Div("Drafted reply (editable)", className="section-eyebrow"),
                     html.Div([
                         dbc.Badge(platform, color="primary", className="me-1"),
                         dbc.Badge("DM" if is_dm else "Comment", color="info",
@@ -1903,15 +1906,54 @@ def _am_render_reply(out: dict, platform: str, is_dm: bool) -> html.Div:
                                           "float": "right"}),
                 ], md=3),
             ]),
-            html.Pre(reply, id="am-reply-text",
-                     style={"fontFamily": "var(--font-body)",
-                            "whiteSpace": "pre-wrap",
-                            "fontSize": "14px", "lineHeight": "1.55",
-                            "background": "var(--warren-soft)",
-                            "padding": "16px", "borderRadius": "var(--radius)",
-                            "border": "1px solid var(--warren-border)",
-                            "color": "var(--warren-ink)",
-                            "marginBottom": "0"}),
+            # Editable textarea so the team can polish before approving.
+            # The id is also the clipboard target — dcc.Clipboard reads .value
+            # for textarea elements automatically.
+            dbc.Textarea(
+                id="am-reply-text",
+                value=reply,
+                style={"fontFamily": "var(--font-body)",
+                       "fontSize": "14px", "lineHeight": "1.55",
+                       "background": "var(--warren-soft)",
+                       "padding": "16px", "borderRadius": "var(--radius)",
+                       "border": "1px solid var(--warren-border)",
+                       "color": "var(--warren-ink)",
+                       "minHeight": "260px", "resize": "vertical"},
+            ),
+
+            # Approve & add to KB row
+            dbc.Row([
+                dbc.Col([
+                    dbc.Label("Tag this exemplar as", className="small text-muted mb-1"),
+                    dcc.Dropdown(
+                        id="am-approve-sentiment",
+                        options=[
+                            {"label": "Approved (default)", "value": "approved"},
+                            {"label": "Question",           "value": "question"},
+                            {"label": "Constructive",       "value": "constructive"},
+                            {"label": "Positive",           "value": "positive"},
+                            {"label": "Negative / hostile", "value": "-ive"},
+                            {"label": "Misc",               "value": "misc"},
+                        ],
+                        value="approved", clearable=False,
+                        style={"fontSize": "13px"},
+                    ),
+                ], md=5),
+                dbc.Col([
+                    dbc.Button("✓  Approve & add to KB",
+                               id="am-approve-btn", color="success",
+                               className="mt-3 w-100"),
+                    dbc.Tooltip(
+                        "Saves the (incoming, edited reply) pair to the Meta Comments "
+                        "spreadsheet so future drafts can learn from it. "
+                        "The reply text used is whatever is currently in the editor above.",
+                        target="am-approve-btn", placement="top",
+                    ),
+                ], md=4),
+                dbc.Col([
+                    html.Div(id="am-approve-status", className="mt-3"),
+                ], md=3),
+            ], className="mt-3 g-2"),
         ]), className="mb-3 shadow-sm",
             style={"borderLeft": "4px solid var(--bs-primary)"}),
 
@@ -1926,6 +1968,7 @@ def _am_render_reply(out: dict, platform: str, is_dm: bool) -> html.Div:
 @app.callback(
     Output("am-output", "children"),
     Output("am-generate-btn", "disabled"),
+    Output("am-current-draft", "data"),
     Input("am-generate-btn", "n_clicks"),
     State("am-message",  "value"),
     State("am-platform", "value"),
@@ -1934,16 +1977,22 @@ def _am_render_reply(out: dict, platform: str, is_dm: bool) -> html.Div:
 )
 def _am_draft(_n, message, platform, kind):
     if not message or not message.strip():
-        return dbc.Alert("Paste a message first.", color="warning"), False
+        return dbc.Alert("Paste a message first.", color="warning"), False, no_update
     try:
         kb = _am_get_kb()
         client = build_anthropic_client(cfg)
     except Exception as e:
-        return dbc.Alert(f"Setup failed: {e}", color="danger"), False
+        return dbc.Alert(f"Setup failed: {e}", color="danger"), False, no_update
     is_dm = (kind == "dm")
     out = draft_reply(message, client=client, model=cfg.anthropic_model,
                       kb=kb, platform_hint=platform, is_dm=is_dm)
-    return _am_render_reply(out, platform=platform, is_dm=is_dm), False
+    # Stash the inputs so the Approve button knows what to write.
+    draft_state = {
+        "message":  message.strip(),
+        "platform": platform or "",
+        "is_dm":    is_dm,
+    }
+    return _am_render_reply(out, platform=platform, is_dm=is_dm), False, draft_state
 
 
 @app.callback(
@@ -1962,6 +2011,54 @@ def _am_refresh(_n):
         )
     except Exception as e:
         return dbc.Alert(f"Rebuild failed: {e}", color="danger")
+
+
+@app.callback(
+    Output("am-approve-status",   "children"),
+    Output("am-approve-btn",      "disabled"),
+    Input("am-approve-btn",       "n_clicks"),
+    State("am-reply-text",        "value"),
+    State("am-approve-sentiment", "value"),
+    State("am-current-draft",     "data"),
+    prevent_initial_call=True,
+)
+def _am_approve(_n, current_reply, sentiment, draft_state):
+    """Write the (incoming, edited reply) pair as a new exemplar to the
+    Meta Comments spreadsheet. The KB is rebuilt automatically by the writer
+    so the next draft sees the new example.
+    """
+    if not draft_state:
+        return dbc.Alert("Generate a draft first.", color="warning",
+                          className="mb-0 py-2 small"), False
+    if not current_reply or not current_reply.strip():
+        return dbc.Alert("Reply is empty — write something to save.",
+                          color="warning", className="mb-0 py-2 small"), False
+
+    result = append_exemplar(
+        comment=draft_state.get("message", ""),
+        response=current_reply,
+        platform=draft_state.get("platform", ""),
+        sentiment=sentiment or "approved",
+        is_dm=bool(draft_state.get("is_dm")),
+    )
+    if not result.get("ok"):
+        return dbc.Alert(f"⚠ {result.get('error', 'unknown error')}",
+                          color="danger", className="mb-0 py-2 small"), False
+
+    # Update the module-level cached KB so the very next draft sees the change.
+    with _am_kb_lock:
+        _am_kb_cache["kb"] = result["kb"]
+
+    n = len(result["kb"].comment_examples)
+    return dbc.Alert(
+        [
+            html.Strong("✓ Added to KB"),
+            html.Br(),
+            html.Small(f"Now {n} exemplar replies. The next draft will use this one.",
+                       className="text-muted"),
+        ],
+        color="success", className="mb-0 py-2 small",
+    ), True   # disable the button so it can't be clicked twice on the same draft
 
 
 # ---------------------------------------------------------------------------

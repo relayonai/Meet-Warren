@@ -283,3 +283,104 @@ def load_knowledge_base(force_rebuild: bool = False) -> KnowledgeBase:
     except (OSError, json.JSONDecodeError) as e:
         log.warning("Cache unreadable (%s); rebuilding", e)
         return build_knowledge_base()
+
+
+# ---------------------------------------------------------------------------
+# Append-from-UI: approved drafts become new exemplars
+# ---------------------------------------------------------------------------
+
+# Header expected/written in meta_comments.xlsx (matches the original schema).
+_XLSX_HEADERS = [
+    "Platform", "Date", "Account name", "comment vs DM", "comment",
+    "sentiment", "action needed?", "Action taken", "response copy (if applicable)",
+]
+
+
+def append_exemplar(
+    *,
+    comment: str,
+    response: str,
+    platform: str = "",
+    sentiment: str = "approved",
+    is_dm: bool = False,
+    account: str = "auto-approved (Answer Machine)",
+    date: Optional[str] = None,
+) -> dict:
+    """Append a new (comment, response) exemplar to meta_comments.xlsx.
+
+    The Answer Machine page calls this when a user clicks "Approve & add to KB".
+    Subsequent draft_reply() calls will see this exemplar via the KB rebuild
+    triggered by the source-mtime change.
+
+    Returns:
+        {
+          "ok":          bool,
+          "path":        str,   # absolute path to the xlsx
+          "row_index":   int,   # 1-based row number where we wrote (incl header)
+          "total_rows":  int,   # rows after the write
+          "kb": KnowledgeBase,  # freshly rebuilt KB
+        }
+        On failure returns {"ok": False, "error": "..."}.
+    """
+    if not comment or not comment.strip():
+        return {"ok": False, "error": "Comment is empty."}
+    if not response or not response.strip():
+        return {"ok": False, "error": "Response is empty."}
+
+    try:
+        import openpyxl
+    except ImportError as e:
+        return {"ok": False, "error": f"openpyxl not installed: {e}"}
+
+    if not os.path.isfile(PATH_COMMENTS):
+        # First-ever exemplar — bootstrap the workbook with headers.
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(_XLSX_HEADERS)
+    else:
+        try:
+            wb = openpyxl.load_workbook(PATH_COMMENTS)
+        except Exception as e:
+            return {"ok": False, "error": f"Could not open {PATH_COMMENTS}: {e}"}
+        ws = wb.active
+
+    # Write the new row.
+    date_str = date or datetime.utcnow().date().isoformat()
+    new_row = [
+        platform or "",
+        date_str,
+        account,
+        "DM" if is_dm else "Comment",
+        comment.strip(),
+        sentiment or "approved",
+        "Y",
+        "replied",
+        response.strip(),
+    ]
+    ws.append(new_row)
+    written_row = ws.max_row
+    total_rows  = written_row
+
+    try:
+        wb.save(PATH_COMMENTS)
+    except PermissionError:
+        return {"ok": False,
+                "error": f"Could not save {PATH_COMMENTS} — close it in Excel and try again."}
+    except OSError as e:
+        return {"ok": False, "error": f"Save failed: {e}"}
+
+    # Rebuild the KB so the next draft_reply() call sees the new exemplar.
+    try:
+        kb = build_knowledge_base()
+    except Exception as e:
+        # The xlsx write succeeded; surfacing a soft error is enough.
+        log.warning("KB rebuild after append failed: %s", e)
+        kb = load_knowledge_base()
+
+    return {
+        "ok":         True,
+        "path":       PATH_COMMENTS,
+        "row_index":  written_row,
+        "total_rows": total_rows,
+        "kb":         kb,
+    }
