@@ -18,7 +18,8 @@ import pandas as pd
 import plotly.express as px
 from dash import Input, Output, State, ctx, dash_table, dcc, html, no_update
 
-from src.answer_machine import append_exemplar, draft_reply, load_knowledge_base
+from src.answer_machine import (append_exemplar, delete_exemplar, draft_reply,
+                                  load_knowledge_base)
 from src.blog_generator import generate_blog_post, blog_to_html, blog_to_text
 from src.blog_quality import quick_score as blog_quick_score
 from src.compliance import ensure_compliant, load_rulebook
@@ -1896,6 +1897,10 @@ def _am_kb_browser_layout(kb) -> html.Div:
             ], className="mt-3"),
         ]), className="mb-3"),
 
+        # Toast slot for delete feedback — sits OUTSIDE the replies pane so
+        # the message survives when the pane re-renders post-delete.
+        html.Div(id="am-kb-delete-status", className="mb-2"),
+
         # --- Two stacked sections; pre-populated with the full corpus -------
         html.Div(_am_render_faqs(kb.faqs),
                  id="am-kb-faqs-pane",     className="mb-3"),
@@ -1962,6 +1967,20 @@ def _am_render_replies(replies: list) -> html.Div:
             (html.Span(f"  ·  {c.date}", className="text-muted small ms-1")
              if c.date else html.Span()),
         ])
+        # Delete control: ConfirmDialogProvider shows a browser-native confirm
+        # so a stray click can't wipe a row. Identifier is the content hash,
+        # not an array index — so deleting one row doesn't mis-target the next.
+        delete_ctl = (
+            dcc.ConfirmDialogProvider(
+                children=dbc.Button(
+                    "🗑  Delete this exemplar",
+                    color="danger", size="sm", outline=True,
+                ),
+                id={"type": "am-kb-delete", "row_id": c.row_id or ""},
+                message=("Delete this past reply from the knowledge base?\n\n"
+                         "This rewrites meta_comments.xlsx and cannot be undone."),
+            ) if c.row_id else html.Div()
+        )
         body = html.Div([
             html.Div("Incoming", className="section-eyebrow"),
             html.Div(c.comment, style={"whiteSpace": "pre-wrap",
@@ -1973,8 +1992,11 @@ def _am_render_replies(replies: list) -> html.Div:
                                          "padding": "10px 14px",
                                          "borderRadius": "var(--radius-sm)",
                                          "border": "1px solid var(--warren-border)"}),
-            (html.Div(f"— @{c.account}" if c.account else "",
-                      className="text-muted small mt-2")),
+            html.Div([
+                html.Span(f"— @{c.account}" if c.account else "",
+                          className="text-muted small me-3"),
+                delete_ctl,
+            ], className="d-flex justify-content-between align-items-center mt-3"),
         ])
         items.append(dbc.AccordionItem(body, title=title))
 
@@ -2413,6 +2435,69 @@ def _am_kb_filter(_search_clicks, _reset_clicks, _enter_n,
     replies = [c for c in kb.comment_examples if _reply_match(c)]
     return (_am_render_faqs(faqs), _am_render_replies(replies),
             no_update, no_update, no_update, no_update)
+
+
+# --- Delete past-reply exemplars from the KB browser ------------------------
+
+@app.callback(
+    Output("am-kb-replies-pane",   "children", allow_duplicate=True),
+    Output("am-kb-delete-status",  "children"),
+    Input({"type": "am-kb-delete", "row_id": dash.ALL}, "submit_n_clicks"),
+    State("am-kb-platform",  "value"),
+    State("am-kb-sentiment", "value"),
+    State("am-kb-search",    "value"),
+    prevent_initial_call=True,
+)
+def _am_kb_delete(_submits, platforms, sentiments, query):
+    """Triggered by ConfirmDialogProvider for any past-reply row.
+    Deletes the row from meta_comments.xlsx, refreshes the KB cache, and
+    re-renders the past-replies pane honouring whatever filters are active.
+    """
+    triggered = ctx.triggered_id
+    # Guard against the spurious initial fire (all submit_n_clicks None).
+    if not triggered or not _submits or not any(s for s in _submits if s):
+        return no_update, no_update
+    if not isinstance(triggered, dict):
+        return no_update, no_update
+    row_id = triggered.get("row_id")
+    if not row_id:
+        return no_update, dbc.Alert("Cannot delete: row_id missing.",
+                                     color="danger", className="mb-0 py-2 small")
+
+    result = delete_exemplar(row_id)
+    if not result.get("ok"):
+        return no_update, dbc.Alert(
+            f"⚠ Delete failed: {result.get('error', 'unknown error')}",
+            color="danger", className="mb-0 py-2 small",
+        )
+
+    # Refresh the module-level KB cache so the next draft sees the deletion.
+    with _am_kb_lock:
+        _am_kb_cache["kb"] = result["kb"]
+    kb = result["kb"]
+
+    # Honour any active platform/sentiment/search filters in the re-render.
+    q = (query or "").strip().lower()
+    platform_set  = set(platforms or [])
+    sentiment_set = set(sentiments or [])
+
+    def _match(c) -> bool:
+        if platform_set and (c.platform or "") not in platform_set:
+            return False
+        if sentiment_set and (c.sentiment or "") not in sentiment_set:
+            return False
+        if not q:
+            return True
+        return q in (c.comment + " " + c.response).lower()
+
+    filtered = [c for c in kb.comment_examples if _match(c)]
+    n = len(kb.comment_examples)
+    toast = dbc.Alert([
+        html.Strong("✓ Exemplar deleted"),
+        html.Br(),
+        html.Small(f"{n} past replies remain in the KB.", className="text-muted"),
+    ], color="success", className="mb-0 py-2 small")
+    return _am_render_replies(filtered), toast
 
 
 # ---------------------------------------------------------------------------

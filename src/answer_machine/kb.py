@@ -11,6 +11,7 @@ source file's mtime is newer than the cache mtime.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -18,6 +19,17 @@ import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Optional
+
+
+def _row_id(comment: str, response: str) -> str:
+    """Stable 16-char hash of the (comment, response) pair.
+
+    Used to identify a past-reply row across reads/writes without depending
+    on the xlsx row index, so manual re-sorting in Excel can never cause a
+    delete to hit the wrong row.
+    """
+    payload = (comment or "").strip() + "\x1f" + (response or "").strip()
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
 
 log = logging.getLogger(__name__)
 
@@ -49,6 +61,7 @@ class CommentExample:
     is_dm: bool = False
     date: str = ""
     account: str = ""
+    row_id: str = ""   # _row_id(comment, response) — set by parser/append
 
 
 @dataclass
@@ -77,7 +90,11 @@ class KnowledgeBase:
             brand_narrative=d.get("brand_narrative", ""),
             brand_voice_principles=d.get("brand_voice_principles", []) or [],
             faqs=[FAQEntry(**f) for f in d.get("faqs", []) or []],
-            comment_examples=[CommentExample(**c) for c in d.get("comment_examples", []) or []],
+            comment_examples=[
+                CommentExample(**{**c, "row_id": c.get("row_id") or
+                                  _row_id(c.get("comment", ""), c.get("response", ""))})
+                for c in d.get("comment_examples", []) or []
+            ],
             sources=d.get("sources", {}) or {},
         )
 
@@ -209,14 +226,17 @@ def _parse_comments(path: str) -> list[CommentExample]:
             date_str = date.date().isoformat()
         elif date:
             date_str = str(date).split(" ")[0]
+        c = str(comment).strip()
+        r = str(response).strip()
         examples.append(CommentExample(
             platform=str(platform or "").strip(),
             sentiment=str(sentiment or "").strip(),
-            comment=str(comment).strip(),
-            response=str(response).strip(),
+            comment=c,
+            response=r,
             is_dm=str(kind or "").strip().lower() == "dm",
             date=date_str,
             account=str(account or "").strip(),
+            row_id=_row_id(c, r),
         ))
     return examples
 
@@ -383,4 +403,78 @@ def append_exemplar(
         "row_index":  written_row,
         "total_rows": total_rows,
         "kb":         kb,
+    }
+
+
+def delete_exemplar(row_id: str) -> dict:
+    """Delete the past-reply row whose (comment, response) hash matches `row_id`.
+
+    Identifies the row by content hash so manual re-sorting in Excel can't
+    cause us to delete the wrong row. If multiple rows hash to the same id
+    (true duplicates), only the first match is removed — which is what you'd
+    want.
+
+    Returns:
+        {
+          "ok":          bool,
+          "path":        str,
+          "deleted_row": int | None,    # 1-based xlsx row that was removed
+          "total_rows":  int,           # rows remaining after delete
+          "kb":          KnowledgeBase, # freshly rebuilt
+        }
+        On failure returns {"ok": False, "error": "..."}.
+    """
+    if not row_id:
+        return {"ok": False, "error": "row_id is required."}
+    if not os.path.isfile(PATH_COMMENTS):
+        return {"ok": False, "error": f"Source spreadsheet missing: {PATH_COMMENTS}"}
+
+    try:
+        import openpyxl
+    except ImportError as e:
+        return {"ok": False, "error": f"openpyxl not installed: {e}"}
+
+    try:
+        wb = openpyxl.load_workbook(PATH_COMMENTS)
+    except Exception as e:
+        return {"ok": False, "error": f"Could not open {PATH_COMMENTS}: {e}"}
+    ws = wb.active
+
+    # Find the matching row. Header is row 1; comment is col E, response col I.
+    found_row: Optional[int] = None
+    for r in range(2, ws.max_row + 1):
+        comment_val = ws.cell(row=r, column=5).value
+        response_val = ws.cell(row=r, column=9).value
+        if not comment_val or not response_val:
+            continue
+        if _row_id(str(comment_val), str(response_val)) == row_id:
+            found_row = r
+            break
+
+    if found_row is None:
+        return {"ok": False, "error": "Row not found in spreadsheet (it may have "
+                                       "already been deleted)."}
+
+    try:
+        ws.delete_rows(found_row, 1)
+        wb.save(PATH_COMMENTS)
+    except PermissionError:
+        return {"ok": False,
+                "error": f"Could not save {PATH_COMMENTS} — close it in Excel and try again."}
+    except OSError as e:
+        return {"ok": False, "error": f"Save failed: {e}"}
+
+    # Rebuild the KB so the next read sees the deletion.
+    try:
+        kb = build_knowledge_base()
+    except Exception as e:
+        log.warning("KB rebuild after delete failed: %s", e)
+        kb = load_knowledge_base()
+
+    return {
+        "ok":          True,
+        "path":        PATH_COMMENTS,
+        "deleted_row": found_row,
+        "total_rows":  ws.max_row,
+        "kb":          kb,
     }
