@@ -18,6 +18,7 @@ import pandas as pd
 import plotly.express as px
 from dash import Input, Output, State, ctx, dash_table, dcc, html, no_update
 
+from src.answer_machine import draft_reply, load_knowledge_base
 from src.blog_generator import generate_blog_post, blog_to_html, blog_to_text
 from src.blog_quality import quick_score as blog_quick_score
 from src.compliance import ensure_compliant, load_rulebook
@@ -168,6 +169,12 @@ SIDEBAR = html.Div([
             active="exact",
             className="sidebar-link fw-semibold",
         ),
+        dbc.NavLink(
+            [html.Span("💬", className="me-2"), "Answer Machine"],
+            href="/answer-machine",
+            active="exact",
+            className="sidebar-link fw-semibold",
+        ),
     ], vertical=True, pills=True, className="px-3 pt-3"),
 
     html.Div("UK Personal Finance · v1", className="warren-sidebar-footer"),
@@ -208,6 +215,8 @@ def route(pathname):
         return _create_page()
     if pathname == "/compliance":
         return _compliance_page()
+    if pathname == "/answer-machine":
+        return _answer_machine_page()
     return _database_page()
 
 
@@ -1715,6 +1724,244 @@ def _compliance_page():
             flagged_table,
         ]), className="shadow-sm mb-4"),
     ])
+
+
+# ===========================================================================
+# ANSWER MACHINE PAGE — drafts brand-aligned replies to incoming comments/DMs
+# ===========================================================================
+
+# Module-level KB cache so we don't re-parse the docx/xlsx on every request.
+# `load_knowledge_base()` itself checks source-file mtimes and rebuilds when
+# stale, so this just avoids the repeated JSON read.
+import threading as _am_threading
+_am_kb_lock = _am_threading.Lock()
+_am_kb_cache: dict = {"kb": None}
+
+
+def _am_get_kb(force: bool = False):
+    with _am_kb_lock:
+        if force or _am_kb_cache["kb"] is None:
+            _am_kb_cache["kb"] = load_knowledge_base(force_rebuild=force)
+        return _am_kb_cache["kb"]
+
+
+def _answer_machine_page():
+    try:
+        kb = _am_get_kb()
+        kb_status = dbc.Badge(
+            f"KB loaded · {len(kb.faqs)} FAQs · {len(kb.comment_examples)} past replies",
+            color="success", className="me-2",
+        )
+        kb_error = None
+    except Exception as e:
+        kb_status = dbc.Badge("KB load failed", color="danger", className="me-2")
+        kb_error  = str(e)
+
+    left_pane = html.Div([
+        dbc.Card(dbc.CardBody([
+            html.Div("Step 1 · Paste the message", className="section-eyebrow"),
+            dbc.Row([
+                dbc.Col([
+                    dbc.Label("Platform"),
+                    dcc.Dropdown(id="am-platform",
+                                 options=[
+                                     {"label": "Instagram",  "value": "Instagram"},
+                                     {"label": "Facebook",   "value": "Facebook"},
+                                     {"label": "TikTok",     "value": "TikTok"},
+                                     {"label": "LinkedIn",   "value": "LinkedIn"},
+                                     {"label": "X / Twitter", "value": "X"},
+                                     {"label": "Other",      "value": "Other"},
+                                 ],
+                                 value="Instagram", clearable=False),
+                ], md=5),
+                dbc.Col([
+                    dbc.Label("Message type"),
+                    dbc.RadioItems(
+                        id="am-kind",
+                        options=[
+                            {"label": "Public comment", "value": "comment"},
+                            {"label": "Direct message", "value": "dm"},
+                        ],
+                        value="comment", inline=True,
+                        inputClassName="me-1", labelClassName="me-3",
+                    ),
+                ], md=7),
+            ], className="g-3"),
+            dbc.Label("Incoming message", className="mt-3"),
+            dbc.Textarea(
+                id="am-message",
+                placeholder="Paste the comment or DM here…",
+                style={"minHeight": "180px", "fontSize": "14px",
+                       "fontFamily": "var(--font-body)"},
+            ),
+            html.Div([
+                dbc.Button("✨  Draft Warren's reply",
+                           id="am-generate-btn", color="primary",
+                           size="lg", className="mt-3"),
+                dbc.Button("Refresh KB",
+                           id="am-refresh-kb-btn", color="link",
+                           size="sm", className="mt-3 ms-2"),
+            ]),
+        ]), className="mb-3"),
+    ], className="create-pane-left")
+
+    right_pane = html.Div([
+        html.Div([kb_status,
+                  html.Span("Powered by Brand Narrative + FAQs + Meta exemplar replies",
+                            className="text-muted small")],
+                 className="mb-2"),
+        html.Div(id="am-output",
+                 children=html.Div("Draft a reply to see it here.",
+                                   className="text-muted small p-4 text-center")),
+    ], className="create-pane-right")
+
+    return html.Div([
+        _page_header("Answer Machine",
+                     "Paste a comment or DM. Get a Warren-tone reply grounded "
+                     "in the FAQs, brand narrative, and 30+ past replies."),
+        (dbc.Alert(f"Knowledge base error: {kb_error}", color="danger")
+         if kb_error else html.Div()),
+        html.Div([left_pane, right_pane], className="create-shell"),
+    ])
+
+
+def _am_render_reply(out: dict, platform: str, is_dm: bool) -> html.Div:
+    """Render the result of draft_reply into a card stack."""
+    if out.get("error"):
+        return dbc.Alert(
+            [html.Strong("Drafting failed: "), out["error"]],
+            color="danger",
+        )
+    reply = out.get("reply") or "(empty reply — try again)"
+    matched_faqs     = out.get("matched_faqs", [])
+    matched_examples = out.get("matched_examples", [])
+
+    # Sources accordion
+    src_items = []
+    if matched_faqs:
+        src_items.append(dbc.AccordionItem([
+            html.Ol([
+                html.Li([
+                    html.Strong(f["question"]), html.Br(),
+                    html.Small(f.get("answer_short") or f.get("answer_long", ""),
+                               className="text-muted"),
+                ], style={"marginBottom": "10px"})
+                for f in matched_faqs
+            ]),
+        ], title=f"Top {len(matched_faqs)} FAQ matches"))
+    if matched_examples:
+        src_items.append(dbc.AccordionItem([
+            html.Ol([
+                html.Li([
+                    dbc.Badge(c.get("platform") or "?", color="secondary",
+                              className="me-1", style={"fontSize": "0.65rem"}),
+                    dbc.Badge(c.get("sentiment") or "?",
+                              color={"positive": "success", "question": "info",
+                                     "constructive": "primary",
+                                     "-ive": "danger", "misc": "secondary"}.get(
+                                          c.get("sentiment"), "secondary"),
+                              className="me-1", style={"fontSize": "0.65rem"}),
+                    html.Span(("DM " if c.get("is_dm") else "Comment "),
+                              className="text-muted small me-1"),
+                    html.Br(),
+                    html.Small("Incoming: ", className="text-muted"),
+                    c["comment"][:240],
+                    html.Br(),
+                    html.Small("Reply: ", className="text-muted"),
+                    html.Span(c["response"][:280],
+                              style={"fontStyle": "italic"}),
+                ], style={"marginBottom": "12px", "fontSize": "13px"})
+                for c in matched_examples
+            ]),
+        ], title=f"Top {len(matched_examples)} past-reply matches"))
+
+    cache_label = ("⚡ cache hit" if out.get("cache_hit")
+                   else "(no cache hit)" if out.get("cache_hit") is False
+                   else "")
+
+    return html.Div([
+        # Reply card with copy button
+        dbc.Card(dbc.CardBody([
+            dbc.Row([
+                dbc.Col([
+                    html.Div("Drafted reply", className="section-eyebrow"),
+                    html.Div([
+                        dbc.Badge(platform, color="primary", className="me-1"),
+                        dbc.Badge("DM" if is_dm else "Comment", color="info",
+                                  className="me-1"),
+                        html.Small(f"{out.get('elapsed_seconds', '?')}s · "
+                                   f"{out.get('model','?').split('-')[1] if '-' in out.get('model','') else out.get('model','')}"
+                                   f" · {cache_label}",
+                                   className="text-muted"),
+                    ], className="mb-2"),
+                ], md=9),
+                dbc.Col([
+                    dcc.Clipboard(target_id="am-reply-text",
+                                   title="Copy to clipboard",
+                                   style={"fontSize": "1.4rem",
+                                          "cursor": "pointer",
+                                          "float": "right"}),
+                ], md=3),
+            ]),
+            html.Pre(reply, id="am-reply-text",
+                     style={"fontFamily": "var(--font-body)",
+                            "whiteSpace": "pre-wrap",
+                            "fontSize": "14px", "lineHeight": "1.55",
+                            "background": "var(--warren-soft)",
+                            "padding": "16px", "borderRadius": "var(--radius)",
+                            "border": "1px solid var(--warren-border)",
+                            "color": "var(--warren-ink)",
+                            "marginBottom": "0"}),
+        ]), className="mb-3 shadow-sm",
+            style={"borderLeft": "4px solid var(--bs-primary)"}),
+
+        # Sources accordion
+        (dbc.Card(dbc.CardBody([
+            html.Div("Sources used", className="section-eyebrow"),
+            dbc.Accordion(src_items, start_collapsed=True, flush=True),
+        ]), className="shadow-sm") if src_items else html.Div()),
+    ])
+
+
+@app.callback(
+    Output("am-output", "children"),
+    Output("am-generate-btn", "disabled"),
+    Input("am-generate-btn", "n_clicks"),
+    State("am-message",  "value"),
+    State("am-platform", "value"),
+    State("am-kind",     "value"),
+    prevent_initial_call=True,
+)
+def _am_draft(_n, message, platform, kind):
+    if not message or not message.strip():
+        return dbc.Alert("Paste a message first.", color="warning"), False
+    try:
+        kb = _am_get_kb()
+        client = build_anthropic_client(cfg)
+    except Exception as e:
+        return dbc.Alert(f"Setup failed: {e}", color="danger"), False
+    is_dm = (kind == "dm")
+    out = draft_reply(message, client=client, model=cfg.anthropic_model,
+                      kb=kb, platform_hint=platform, is_dm=is_dm)
+    return _am_render_reply(out, platform=platform, is_dm=is_dm), False
+
+
+@app.callback(
+    Output("am-output", "children", allow_duplicate=True),
+    Input("am-refresh-kb-btn", "n_clicks"),
+    prevent_initial_call=True,
+)
+def _am_refresh(_n):
+    try:
+        kb = _am_get_kb(force=True)
+        return dbc.Alert(
+            f"Knowledge base rebuilt: {len(kb.faqs)} FAQs, "
+            f"{len(kb.comment_examples)} past replies, "
+            f"{len(kb.brand_voice_principles)} voice principles.",
+            color="success",
+        )
+    except Exception as e:
+        return dbc.Alert(f"Rebuild failed: {e}", color="danger")
 
 
 # ---------------------------------------------------------------------------
