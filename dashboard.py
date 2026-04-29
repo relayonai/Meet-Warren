@@ -1845,8 +1845,12 @@ _AM_SENTIMENT_COLORS = {
 
 
 def _am_kb_browser_layout(kb) -> html.Div:
-    """Render the search/filter shell. The lists themselves are populated by
-    a callback so search + filter dropdowns can update them without a reload.
+    """Render the search/filter shell.
+
+    The two list panes are PRE-POPULATED with the full KB at page load (no
+    callback needed for initial render — avoids dash 4 initial-fire
+    flakiness). The Search button + dropdown changes update them via the
+    `_am_kb_filter` callback.
     """
     sections   = sorted({f.section for f in kb.faqs if f.section})
     platforms  = sorted({c.platform for c in kb.comment_examples if c.platform})
@@ -1858,10 +1862,12 @@ def _am_kb_browser_layout(kb) -> html.Div:
             html.Div("Search the knowledge base", className="section-eyebrow"),
             dbc.Row([
                 dbc.Col([
-                    dbc.Label("Search"),
+                    dbc.Label("Search text"),
                     dbc.Input(id="am-kb-search", type="text",
-                              placeholder="Search questions, answers, comments, replies…",
-                              debounce=False),
+                              placeholder="e.g. ISA, advice, ChatGPT, pension…",
+                              debounce=True, n_submit=0),
+                    html.Small("Tip: press Enter to search.",
+                               className="text-muted"),
                 ], md=5),
                 dbc.Col([
                     dbc.Label("FAQ section"),
@@ -1882,11 +1888,19 @@ def _am_kb_browser_layout(kb) -> html.Div:
                                  placeholder="All", multi=True, clearable=True),
                 ], md=2),
             ], className="g-3"),
+            html.Div([
+                dbc.Button("🔍  Search", id="am-kb-search-btn",
+                           color="primary", size="sm", className="me-2"),
+                dbc.Button("✕  Clear", id="am-kb-reset-btn",
+                           color="light", size="sm", outline=True),
+            ], className="mt-3"),
         ]), className="mb-3"),
 
-        # --- Two stacked sections; populated by callback --------------------
-        html.Div(id="am-kb-faqs-pane",     className="mb-3"),
-        html.Div(id="am-kb-replies-pane"),
+        # --- Two stacked sections; pre-populated with the full corpus -------
+        html.Div(_am_render_faqs(kb.faqs),
+                 id="am-kb-faqs-pane",     className="mb-3"),
+        html.Div(_am_render_replies(kb.comment_examples),
+                 id="am-kb-replies-pane"),
     ])
 
 
@@ -2306,17 +2320,21 @@ def _am_approve(_n, current_reply, sentiment, draft_state):
 # --- Template buttons (H) ---------------------------------------------------
 
 @app.callback(
-    Output("am-message",  "value", allow_duplicate=True),
-    Output("am-platform", "value", allow_duplicate=True),
-    Output("am-kind",     "value", allow_duplicate=True),
+    Output("am-message",  "value"),
+    Output("am-platform", "value"),
+    Output("am-kind",     "value"),
     Input({"type": "am-template", "index": dash.ALL}, "n_clicks"),
     prevent_initial_call=True,
 )
 def _am_template_click(_clicks):
-    """Pattern-matching callback: any template button → pre-fill the input."""
+    """Pattern-matching callback: any template button → pre-fill the input.
+
+    NOTE on the lack of allow_duplicate: dash 4 validates allow_duplicate=True
+    strictly and silently drops updates when no other callback writes the
+    same output. Nothing else writes am-message/platform/kind, so we don't
+    need (or want) the flag here.
+    """
     triggered = ctx.triggered_id
-    # Pattern-matching callbacks fire with all-None on initial render of the
-    # tab; defend against that and against stale triggers when n_clicks==0.
     if not triggered or not _clicks or not any(c for c in _clicks if c):
         return no_update, no_update, no_update
     idx = triggered.get("index") if isinstance(triggered, dict) else None
@@ -2335,21 +2353,39 @@ def _am_template_click(_clicks):
 @app.callback(
     Output("am-kb-faqs-pane",    "children"),
     Output("am-kb-replies-pane", "children"),
-    Input("am-kb-search",    "value"),
-    Input("am-kb-section",   "value"),
-    Input("am-kb-platform",  "value"),
-    Input("am-kb-sentiment", "value"),
-    Input("am-tabs",         "active_tab"),
+    Output("am-kb-search",    "value"),
+    Output("am-kb-section",   "value"),
+    Output("am-kb-platform",  "value"),
+    Output("am-kb-sentiment", "value"),
+    Input("am-kb-search-btn", "n_clicks"),
+    Input("am-kb-reset-btn",  "n_clicks"),
+    Input("am-kb-search",     "n_submit"),     # pressing Enter in the search box
+    Input("am-kb-section",    "value"),
+    Input("am-kb-platform",   "value"),
+    Input("am-kb-sentiment",  "value"),
+    State("am-kb-search",     "value"),
+    prevent_initial_call=True,
 )
-def _am_kb_filter(query, sections, platforms, sentiments, active_tab):
-    """Render the FAQ + past-reply lists filtered by the search/dropdown state.
-    Re-fires when the tab is activated so first render is correct.
+def _am_kb_filter(_search_clicks, _reset_clicks, _enter_n,
+                  sections, platforms, sentiments, query):
+    """Filter the KB browser. Triggered by:
+    - Click on the Search button
+    - Pressing Enter in the search box
+    - Click on the Clear button (resets all inputs)
+    - Change in any of the three dropdowns
     """
+    trig = ctx.triggered_id
     try:
         kb = _am_get_kb()
     except Exception as e:
         msg = dbc.Alert(f"KB load failed: {e}", color="danger")
-        return msg, msg
+        return msg, msg, no_update, no_update, no_update, no_update
+
+    # Clear button: wipe all filter state and re-render with the full corpus.
+    if trig == "am-kb-reset-btn":
+        return (_am_render_faqs(kb.faqs),
+                _am_render_replies(kb.comment_examples),
+                "", None, None, None)
 
     q = (query or "").strip().lower()
     section_set   = set(sections or [])
@@ -2375,7 +2411,8 @@ def _am_kb_filter(query, sections, platforms, sentiments, active_tab):
 
     faqs    = [f for f in kb.faqs if _faq_match(f)]
     replies = [c for c in kb.comment_examples if _reply_match(c)]
-    return _am_render_faqs(faqs), _am_render_replies(replies)
+    return (_am_render_faqs(faqs), _am_render_replies(replies),
+            no_update, no_update, no_update, no_update)
 
 
 # ---------------------------------------------------------------------------
