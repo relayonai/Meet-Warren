@@ -27,6 +27,7 @@ from src.database import get_connection, init_db, query_articles
 from src.exporters import to_pdf, to_docx, to_markdown, to_eml
 from src.formatter import to_html, to_text
 from src.generator import generate_newsletter
+from src.internal_links import load_published_corpus
 
 # ---------------------------------------------------------------------------
 # Bootstrap
@@ -1092,7 +1093,14 @@ def _run_generation_job(job_id: str, summaries: list, content_type: str) -> None
             base = _versioned_basename("newsletter")
             kind = "newsletter"
         elif content_type == "blog":
-            result = generate_blog_post(summaries, client, cfg.anthropic_model)
+            # Pull prior Warren posts so the LLM can weave 3–5 internal links.
+            # The post being generated doesn't exist on disk yet, so nothing
+            # to exclude — but pass exclude_basename anyway for symmetry.
+            existing_corpus = load_published_corpus(cfg.output_dir)
+            result = generate_blog_post(
+                summaries, client, cfg.anthropic_model,
+                existing_posts=existing_corpus,
+            )
             if not result:
                 raise RuntimeError("Blog post generation returned no content.")
             out_html, out_text = blog_to_html(result), blog_to_text(result)

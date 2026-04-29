@@ -14,6 +14,7 @@ RFC 822 file you can double-click into Mail/Outlook.
 from __future__ import annotations
 
 import io
+import json
 import logging
 import os
 from datetime import datetime, timezone
@@ -353,6 +354,25 @@ def _md_blog(result: dict) -> str:
 
     if result.get("seo_tags"):
         out.append("Tags: " + " ".join(f"#{t}" for t in result["seo_tags"]))
+
+    # JSON-LD schema block at the bottom. Many CMS importers (Hugo, Astro, MDX)
+    # accept raw HTML inline, and the quality analyser detects schema via either
+    # BeautifulSoup OR a regex match on `"@type":` so the markdown gets credit
+    # equal to the HTML output.
+    try:
+        from .blog_generator import build_jsonld
+        schemas = build_jsonld(result)
+        if schemas:
+            out += ["", "<!-- JSON-LD schema below — recognised by Google + the blog quality analyser -->"]
+            for d in schemas:
+                out.append(
+                    f'<script type="application/ld+json">'
+                    f'{json.dumps(d, ensure_ascii=False)}'
+                    f'</script>'
+                )
+    except Exception as e:
+        log.warning("Could not embed JSON-LD in markdown: %s", e)
+
     return "\n".join(out)
 
 

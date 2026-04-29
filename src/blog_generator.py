@@ -140,6 +140,8 @@ Hard bans (will fail compliance):
 - Words: "guaranteed", "risk-free", "best ever", "you must", "guaranteed to".
 - Personalised investment advice. Frame as scenarios, not recommendations.
 
+{related_posts_block}
+
 Article records (JSON):
 {articles_json}
 """
@@ -149,7 +151,20 @@ def generate_blog_post(
     article_summaries: List[dict],
     client: anthropic.Anthropic,
     model: str,
+    *,
+    existing_posts: Optional[List[dict]] = None,
 ) -> Optional[dict]:
+    """Generate a blog post.
+
+    Args:
+        article_summaries: scraped article context for the body.
+        client / model:    anthropic client + model name.
+        existing_posts:    optional corpus of prior Warren blog posts for the
+                           internal-link suggester (see src/internal_links.py).
+                           When provided, the prompt instructs the LLM to weave
+                           3–5 inline links into the draft using markdown link
+                           syntax. Empty / None disables the suggestion.
+    """
     if not article_summaries:
         return None
 
@@ -158,10 +173,17 @@ def generate_blog_post(
     div = _diversity_warning_blog(article_summaries) or ""
     diversity_note = f"⚠ {div}\n" if div else ""
 
+    related_posts_block = ""
+    if existing_posts:
+        # Local import keeps the optional dep out of cold start.
+        from .internal_links import format_for_prompt
+        related_posts_block = format_for_prompt(existing_posts)
+
     prompt = USER_TEMPLATE.format(
         articles_json=json.dumps(article_summaries, ensure_ascii=False, indent=2),
         today_human=today_human,
         diversity_note=diversity_note,
+        related_posts_block=related_posts_block,
     )
     try:
         resp = client.messages.create(
@@ -347,6 +369,56 @@ def _tldr_html(takeaways: list) -> str:
     )
 
 
+def build_jsonld(post: dict) -> list[dict]:
+    """Return JSON-LD schema dicts for a post.
+
+    Always includes a NewsArticle. Includes FAQPage when faqs are present.
+    Reused by blog_to_html (HTML <head>) and the markdown exporter so the
+    quality analyser credits schema regardless of which artifact it scores.
+    """
+    title       = (post.get("title") or "").strip()
+    description = (post.get("meta_description") or post.get("subtitle") or "").strip()[:300]
+    url         = (post.get("canonical_url") or "").strip()
+    published   = (post.get("published_iso") or datetime.now(timezone.utc).date().isoformat())
+    tags        = post.get("seo_tags") or []
+
+    article_ld = {
+        "@context": "https://schema.org",
+        "@type": "NewsArticle",
+        "headline": title,
+        "description": description,
+        "datePublished": published,
+        "dateModified": published,
+        "author": [{"@type": "Organization", "name": "Warren Editorial Desk"}],
+        "publisher": {
+            "@type": "Organization",
+            "name": "Warren",
+            "url": "https://meetwarren.co.uk",
+        },
+        "mainEntityOfPage": url or "",
+        "keywords": ", ".join(tags),
+        "speakable": {
+            "@type": "SpeakableSpecification",
+            "cssSelector": [".tldr", "h1"],
+        },
+    }
+    out = [article_ld]
+    if post.get("faqs"):
+        out.append({
+            "@context": "https://schema.org",
+            "@type": "FAQPage",
+            "mainEntity": [
+                {
+                    "@type": "Question",
+                    "name": f.get("question", ""),
+                    "acceptedAnswer": {"@type": "Answer", "text": f.get("answer", "")},
+                }
+                for f in post["faqs"]
+            ],
+        })
+    return out
+
+
 def _seo_head(post: dict) -> str:
     """Open Graph + Twitter Card + JSON-LD Article + canonical + meta description."""
     title       = (post.get("title") or "").strip()
@@ -374,47 +446,14 @@ def _seo_head(post: dict) -> str:
   <meta name="twitter:title" content="{escape(title)}">
   <meta name="twitter:description" content="{escape(description)}">"""
 
-    article_ld = {
-        "@context": "https://schema.org",
-        "@type": "NewsArticle",
-        "headline": title,
-        "description": description,
-        "datePublished": published,
-        "dateModified": published,
-        "author": [{"@type": "Organization", "name": "Warren Editorial Desk"}],
-        "publisher": {
-            "@type": "Organization",
-            "name": "Warren",
-            "url": "https://meetwarren.co.uk",
-        },
-        "mainEntityOfPage": url or "",
-        "keywords": ", ".join(tags),
-        "speakable": {
-            "@type": "SpeakableSpecification",
-            "cssSelector": [".tldr", "h1"],
-        },
-    }
-
-    faq_ld = ""
-    if post.get("faqs"):
-        faq_obj = {
-            "@context": "https://schema.org",
-            "@type": "FAQPage",
-            "mainEntity": [
-                {
-                    "@type": "Question",
-                    "name": f.get("question", ""),
-                    "acceptedAnswer": {"@type": "Answer", "text": f.get("answer", "")},
-                }
-                for f in post["faqs"]
-            ],
-        }
-        faq_ld = f'\n  <script type="application/ld+json">{json.dumps(faq_obj, ensure_ascii=False)}</script>'
+    ld_blocks = "".join(
+        f'\n  <script type="application/ld+json">{json.dumps(d, ensure_ascii=False)}</script>'
+        for d in build_jsonld(post)
+    )
 
     return f"""
   <meta name="description" content="{escape(description)}">
-  {canonical}{og}{twitter}
-  <script type="application/ld+json">{json.dumps(article_ld, ensure_ascii=False)}</script>{faq_ld}"""
+  {canonical}{og}{twitter}{ld_blocks}"""
 
 
 def blog_to_html(post: dict) -> str:
