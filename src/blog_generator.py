@@ -99,6 +99,47 @@ Requirements:
 - seo_tags: 5-8 lowercase tags relevant to UK personal finance.
 - Do NOT copy sentences verbatim from the inputs — synthesise and analyse.
 
+— QUALITY RUBRIC (drives the post-publish 100-pt analyser score) —
+Adapted from AgriciDaniel/claude-blog references (eeat-signals, quality-scoring, geo-optimization).
+Hit these targets so the analyser scores the post 80+:
+
+CONTENT (30 pts)
+- Total length 1,500–2,500 words. Sections ~120–180 words between H2s.
+- Sentence length: average 15–20 words; ≤25% over 20 words; none over 40.
+- Flesch reading ease: aim 60–70 (acceptable 55–75).
+- Passive voice ≤10%. Avoid AI-trigger words ("delve", "leverage", "navigate the
+  landscape", "in today's fast-paced world", "it's important to note").
+- Originality markers: include at least one of [first-person observation,
+  ORIGINAL DATA, "in our analysis", "we tested", "we found"].
+- Engagement: include at least 2 rhetorical questions and 2 concrete worked
+  examples or scenarios in the body.
+
+SEO (25 pts)
+- Title 40–60 chars, front-loaded keyword, no clickbait.
+- meta_description 150–160 chars, includes one statistic, ends with a value prop.
+- Each H2 contains the primary keyword OR a closely related phrase.
+- Reference 3–8 authoritative outbound sources via inline citations like
+  "(HMRC, 2026)" — every statistic must be attributed inline AND appear in
+  sources_cited. Never fabricate numbers.
+
+E-E-A-T (15 pts)
+- Use first-person plural ("we") sparingly, only where it reflects analytical
+  experience (e.g. "in our reading of the FCA's 2026 guidance...").
+- Cite tier-1 UK sources where possible (gov.uk, BoE, FCA, ONS, FT, Reuters).
+- Include at least one quoted phrase from a named institution or report.
+
+TECHNICAL / AI CITATION (15 + 15 pts)
+- Use lists, comparison tables (in markdown), and numbered steps freely —
+  these formats earn 2.5× more AI citations than prose paragraphs.
+- Front-load each section with a 1-sentence answer, then expand. AI engines
+  preferentially cite answer-first paragraphs.
+- FAQs must be genuine reader questions, not rephrased section headings.
+
+Hard bans (will fail compliance):
+- Crypto / cryptocurrency / Bitcoin / Ethereum advice (banned topic §2.4).
+- Words: "guaranteed", "risk-free", "best ever", "you must", "guaranteed to".
+- Personalised investment advice. Frame as scenarios, not recommendations.
+
 Article records (JSON):
 {articles_json}
 """

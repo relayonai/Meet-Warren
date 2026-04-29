@@ -11,3 +11,4 @@ plotly>=5.18.0
 pandas>=2.0.0
 python-docx>=1.1.0          # DOCX export
 weasyprint>=60.0            # PDF export (needs system Pango/Cairo: `brew install pango`)
+textstat>=0.7.3,<1.0.0      # Readability scoring used by src/blog_quality.py (vendored from AgriciDaniel/claude-blog, MIT)

@@ -19,6 +19,7 @@ import plotly.express as px
 from dash import Input, Output, State, ctx, dash_table, dcc, html, no_update
 
 from src.blog_generator import generate_blog_post, blog_to_html, blog_to_text
+from src.blog_quality import quick_score as blog_quick_score
 from src.compliance import ensure_compliant, load_rulebook
 from src.compliance.pipeline import init_compliance_tables
 from src.config import build_anthropic_client, load_config
@@ -934,6 +935,7 @@ _STAGES = [
     ("draft",      "Drafting with Claude"),
     ("compliance", "Compliance grading + revision"),
     ("export",     "Rendering PDF, DOCX, Markdown, EML"),
+    ("quality",    "Scoring on 100-pt rubric (blog only)"),
     ("done",       "Done"),
 ]
 
@@ -1118,6 +1120,24 @@ def _run_generation_job(job_id: str, summaries: list, content_type: str) -> None
                                    subject=subject, summaries_in=summaries,
                                    compliance_dict=compliance)
 
+        # --- Quality scoring (blog only — analyser is blog-tuned) -----------
+        quality = None
+        if kind == "blog":
+            _set_stage(job_id, "quality", sub="100-pt rubric")
+            try:
+                # Score the markdown rendering (richer signal than HTML alone:
+                # frontmatter + headings + links survive the markdown export).
+                md_path = paths.get("md")
+                if md_path and os.path.exists(md_path):
+                    with open(md_path) as f:
+                        md_text = f.read()
+                else:
+                    md_text = to_markdown(result, kind=kind)
+                quality = blog_quick_score(md_text, suffix=".md")
+            except Exception as e:
+                print(f"Quality scoring failed: {e}")
+                quality = {"error": str(e)}
+
         # --- Build final preview component ----------------------------------
         if kind == "newsletter":
             sections_list = []
@@ -1145,7 +1165,8 @@ def _run_generation_job(job_id: str, summaries: list, content_type: str) -> None
             if result.get("sources_cited"): meta_list.append(dbc.ListGroupItem(f"🔗 {len(result['sources_cited'])} sources cited"))
             if result.get("seo_tags"):      meta_list.append(dbc.ListGroupItem("🏷️ " + " ".join(f"#{t}" for t in result["seo_tags"])))
             preview = _content_preview("📝 Blog Post Generated", subject,
-                                        paths, out_html, meta_list, compliance)
+                                        paths, out_html, meta_list, compliance,
+                                        quality=quality)
 
         with _jobs_lock:
             _jobs[job_id]["stage"]      = "done"
@@ -1331,6 +1352,103 @@ def _compliance_card(compliance: dict) -> dbc.Card:
     ]), className="shadow-sm mb-3", style={"borderLeft": f"4px solid var(--bs-{color})"})
 
 
+def _quality_card(quality: dict) -> dbc.Card:
+    """Render the 100-pt blog quality breakdown."""
+    if not quality:
+        return html.Div()
+    if quality.get("error"):
+        return dbc.Alert(
+            [html.Strong("Quality scoring failed: "), quality["error"]],
+            color="warning", className="mb-3",
+        )
+
+    total = int(quality.get("total", 0))
+    grade = quality.get("grade", "Unknown")
+    cats  = quality.get("categories", {}) or {}
+    maxs  = quality.get("max_per_category", {}) or {}
+    issues = quality.get("top_issues", []) or []
+
+    grade_colors = {
+        "Exceptional":    "success",
+        "Strong":         "success",
+        "Acceptable":     "warning",
+        "Below Standard": "warning",
+        "Rewrite":        "danger",
+    }
+    color = grade_colors.get(grade, "secondary")
+    accent_color = ("success" if total >= 80 else
+                    "warning" if total >= 60 else "danger")
+
+    cat_meta = [
+        ("Content",      "content",   "Depth, readability, originality, structure, engagement, grammar"),
+        ("SEO",          "seo",       "Title, headings, keywords, links, meta, URL"),
+        ("E-E-A-T",      "eeat",      "Author, citations, trust, experience"),
+        ("Technical",    "technical", "Schema, images, structured data, social"),
+        ("AI Citation",  "ai",        "Citability, Q&A, entities, extraction"),
+    ]
+    cat_rows = []
+    for label, key, blurb in cat_meta:
+        v = int(cats.get(key, 0))
+        m = int(maxs.get(key, 1)) or 1
+        pct = int((v / m) * 100)
+        bar_color = ("success" if pct >= 80 else
+                     "warning" if pct >= 50 else "danger")
+        cat_rows.append(dbc.Row([
+            dbc.Col(html.Div([
+                html.Strong(label, className="me-2"),
+                html.Small(blurb, className="text-muted",
+                           style={"fontSize": "11px"}),
+            ]), md=6),
+            dbc.Col(html.Div(f"{v} / {m}", className="text-end fw-bold"), md=2),
+            dbc.Col(dbc.Progress(value=pct, color=bar_color,
+                                 style={"height": "10px", "marginTop": "8px"}),
+                    md=4),
+        ], className="mb-2"))
+
+    sev_color = {"high": "danger", "medium": "warning", "low": "secondary"}
+    issue_items = [
+        html.Li([
+            dbc.Badge((iss.get("severity") or "low").upper(),
+                      color=sev_color.get(iss.get("severity"), "secondary"),
+                      className="me-2", style={"fontSize": "0.65rem"}),
+            html.Span(f"[{iss.get('category', '')}] ", className="text-muted small"),
+            iss.get("issue", ""),
+        ], style={"marginBottom": "6px", "fontSize": "13px"})
+        for iss in issues
+    ]
+
+    return dbc.Card(dbc.CardBody([
+        dbc.Row([
+            dbc.Col([
+                html.Span("📊", style={"fontSize": "1.5rem"}),
+                html.Span("  Blog Quality Score: ", className="ms-2"),
+                dbc.Badge(f"{total}/100", color=accent_color,
+                          className="ms-1", style={"fontSize": "0.95rem"}),
+                html.Span(f"  · {grade}", className="text-muted ms-2",
+                          style={"fontSize": "0.95rem"}),
+                html.Div("AgriciDaniel/claude-blog · MIT-licensed analyzer",
+                         className="text-muted",
+                         style={"fontSize": "10px", "marginTop": "4px"}),
+            ], md=8),
+            dbc.Col([
+                dbc.Badge(quality.get("content_type") or "post",
+                          color="light", className="float-end"),
+            ], md=4),
+        ], className="mb-3"),
+
+        html.Div(cat_rows, className="mb-3"),
+
+        dbc.Accordion([
+            dbc.AccordionItem([
+                html.H6("Top quality fixes", className="text-muted"),
+                html.Ul(issue_items) if issue_items
+                  else html.Em("No issues flagged.", className="text-success"),
+            ], title=f"View {len(issues)} prioritised fix(es)"),
+        ], start_collapsed=True, flush=True),
+    ]), className="shadow-sm mb-3",
+        style={"borderLeft": f"4px solid var(--bs-{color})"})
+
+
 _FORMAT_META = {
     "html": ("🌐 HTML",     "primary",  "Open / send as web page"),
     "pdf":  ("📄 PDF",      "danger",   "Print / share as PDF"),
@@ -1367,7 +1485,8 @@ def _download_bar(paths: dict) -> html.Div:
 
 def _content_preview(badge_title: str, content_title: str,
                      paths: dict, preview_html: str, meta_items: list,
-                     compliance: dict | None = None) -> html.Div:
+                     compliance: dict | None = None,
+                     quality: dict | None = None) -> html.Div:
     primary = paths.get("html") or next(iter(paths.values()), "")
     return html.Div([
         dbc.Alert([
@@ -1381,6 +1500,7 @@ def _content_preview(badge_title: str, content_title: str,
         ], color="success", className="mb-3"),
         _download_bar(paths),
         _compliance_card(compliance) if compliance else html.Div(),
+        _quality_card(quality) if quality else html.Div(),
         dbc.Row([
             dbc.Col([
                 dbc.Card(dbc.CardBody([

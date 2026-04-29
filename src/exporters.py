@@ -289,10 +289,35 @@ def _md_newsletter(result: dict) -> str:
 
 
 def _md_blog(result: dict) -> str:
-    out = []
-    out += [f"# {result.get('title','Untitled')}", ""]
+    out: list[str] = []
+
+    # YAML frontmatter — required for SEO/E-E-A-T tooling and recognised by
+    # Hugo, Jekyll, Astro, MDX, and the AgriciDaniel/claude-blog analyser.
+    def _yaml_str(value: str) -> str:
+        # YAML-safe string: escape double quotes, then wrap in quotes.
+        return '"' + (value or "").replace('"', '\\"') + '"'
+
+    title       = result.get("title", "Untitled")
+    description = result.get("meta_description") or result.get("subtitle") or ""
+    author      = result.get("byline") or "The Warren Editorial Desk"
+    published   = result.get("published_iso") or ""
+    tags        = result.get("seo_tags") or []
+
+    out.append("---")
+    out.append(f"title: {_yaml_str(title)}")
+    if description:
+        out.append(f"description: {_yaml_str(description)}")
+    out.append(f"author: {_yaml_str(author)}")
+    if published:
+        out.append(f"date: {published}")
+    if tags:
+        out.append(f"tags: [{', '.join(_yaml_str(t) for t in tags)}]")
+    out.append("---")
+    out.append("")
+
+    out += [f"# {title}", ""]
     if result.get("subtitle"):
-        out += [f"## {result['subtitle']}", ""]
+        out += [f"_{result['subtitle']}_", ""]
     meta_bits = []
     if result.get("byline"):                meta_bits.append(result["byline"])
     if result.get("reading_time_minutes"):  meta_bits.append(f"{result['reading_time_minutes']} min read")
