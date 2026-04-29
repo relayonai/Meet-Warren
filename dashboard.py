@@ -1745,6 +1745,232 @@ def _am_get_kb(force: bool = False):
         return _am_kb_cache["kb"]
 
 
+# Pre-canned message templates — recurring patterns lifted directly from the
+# Meta corpus. Click → pre-fills the paste box (and optionally platform/kind).
+# Useful for QA, training new team members, and reproducing edge cases.
+_AM_TEMPLATES: list[dict] = [
+    {
+        "label":   "Just use ChatGPT",
+        "message": "Just use the latest version of ChatGPT in thinking mode",
+        "platform": "Instagram", "kind": "comment",
+        "tooltip": "Generic 'why bother with Warren' challenge — most common comment.",
+    },
+    {
+        "label":   "Just speak to an IFA",
+        "message": "Do not use - far better speak to a local IFA and get regulated advice - not vague and often incorrect information",
+        "platform": "Facebook", "kind": "comment",
+        "tooltip": "Anti-AI / pro-IFA pushback. Standard reply uses the dentist/toothpaste analogy.",
+    },
+    {
+        "label":   "It's just a spreadsheet",
+        "message": "\"Not Advice\" - so basically an Excel Spreadsheet to add 1 and 1 to make 2????",
+        "platform": "Facebook", "kind": "comment",
+        "tooltip": "Dismissive 'this is just Excel' jab.",
+    },
+    {
+        "label":   "Not FCA approved",
+        "message": "Good idea, but not FCA approved, it's AI with extra steps. What is your security? Overall liability for your financial advice? How do I get in touch with a person?",
+        "platform": "Instagram", "kind": "comment",
+        "tooltip": "Constructive scrutiny — security + advice scope + escalation path.",
+    },
+    {
+        "label":   "Disclaimer contradiction",
+        "message": "You claim this is \"not financial advice,\" yet you go on to offer what is clearly financial guidance. as if adding a caveat somehow makes it acceptable. People should be very wary of products like this as there is no protection if things go wrong.",
+        "platform": "Instagram", "kind": "comment",
+        "tooltip": "Legal/regulatory challenge to the 'not advice' line.",
+    },
+    {
+        "label":   "Pricing",
+        "message": "cost?",
+        "platform": "Instagram", "kind": "comment",
+        "tooltip": "Quick pricing question — short reply with the canonical pricing block.",
+    },
+    {
+        "label":   "Is it free?",
+        "message": "Is it free",
+        "platform": "Instagram", "kind": "comment",
+        "tooltip": "Free-tier question.",
+    },
+    {
+        "label":   "Android app?",
+        "message": "Will there be an android app?",
+        "platform": "Instagram", "kind": "dm",
+        "tooltip": "Roadmap question — DM, conversational reply.",
+    },
+    {
+        "label":   "Login problem",
+        "message": "I get login failed error when trying to sign up",
+        "platform": "Instagram", "kind": "dm",
+        "tooltip": "Support / troubleshooting DM.",
+    },
+    {
+        "label":   "Hostile / troll",
+        "message": "Looking forward to you being bankrupt after fooling thousands of idiots to trust your useless robot to handle their finances.",
+        "platform": "Instagram", "kind": "comment",
+        "tooltip": "Hostile commentary — calm, factual, doesn't escalate.",
+    },
+]
+
+
+def _am_template_buttons() -> html.Div:
+    """Pre-canned message templates as a wrap-friendly button row."""
+    btns = []
+    for i, tpl in enumerate(_AM_TEMPLATES):
+        bid = {"type": "am-template", "index": i}
+        btns.append(html.Span([
+            dbc.Button(tpl["label"], id=bid, color="light", size="sm",
+                       outline=True, n_clicks=0,
+                       className="me-2 mb-2",
+                       style={"fontSize": "12px", "fontWeight": "600"}),
+            dbc.Tooltip(tpl["tooltip"], target=bid, placement="top"),
+        ]))
+    return html.Div([
+        html.Div("Quick templates · click to load", className="section-eyebrow"),
+        html.Div(btns, style={"display": "flex", "flexWrap": "wrap"}),
+    ], className="mb-3")
+
+
+# ---------------------------------------------------------------------------
+# KB browser tab (I) — searchable view of FAQs + past replies
+# ---------------------------------------------------------------------------
+
+_AM_SENTIMENT_COLORS = {
+    "positive":     "success",
+    "question":     "info",
+    "constructive": "primary",
+    "-ive":         "danger",
+    "misc":         "secondary",
+    "approved":     "success",
+}
+
+
+def _am_kb_browser_layout(kb) -> html.Div:
+    """Render the search/filter shell. The lists themselves are populated by
+    a callback so search + filter dropdowns can update them without a reload.
+    """
+    sections   = sorted({f.section for f in kb.faqs if f.section})
+    platforms  = sorted({c.platform for c in kb.comment_examples if c.platform})
+    sentiments = sorted({c.sentiment for c in kb.comment_examples if c.sentiment})
+
+    return html.Div([
+        # --- Filter strip ---------------------------------------------------
+        dbc.Card(dbc.CardBody([
+            html.Div("Search the knowledge base", className="section-eyebrow"),
+            dbc.Row([
+                dbc.Col([
+                    dbc.Label("Search"),
+                    dbc.Input(id="am-kb-search", type="text",
+                              placeholder="Search questions, answers, comments, replies…",
+                              debounce=False),
+                ], md=5),
+                dbc.Col([
+                    dbc.Label("FAQ section"),
+                    dcc.Dropdown(id="am-kb-section",
+                                 options=[{"label": s, "value": s} for s in sections],
+                                 placeholder="All sections", multi=True, clearable=True),
+                ], md=3),
+                dbc.Col([
+                    dbc.Label("Platform"),
+                    dcc.Dropdown(id="am-kb-platform",
+                                 options=[{"label": p, "value": p} for p in platforms],
+                                 placeholder="All platforms", multi=True, clearable=True),
+                ], md=2),
+                dbc.Col([
+                    dbc.Label("Sentiment"),
+                    dcc.Dropdown(id="am-kb-sentiment",
+                                 options=[{"label": s, "value": s} for s in sentiments],
+                                 placeholder="All", multi=True, clearable=True),
+                ], md=2),
+            ], className="g-3"),
+        ]), className="mb-3"),
+
+        # --- Two stacked sections; populated by callback --------------------
+        html.Div(id="am-kb-faqs-pane",     className="mb-3"),
+        html.Div(id="am-kb-replies-pane"),
+    ])
+
+
+def _am_render_faqs(faqs: list) -> html.Div:
+    if not faqs:
+        return dbc.Card(dbc.CardBody([
+            html.Div("FAQs", className="section-eyebrow"),
+            html.Em("No FAQs match your filters.", className="text-muted"),
+        ]))
+    items = []
+    for f in faqs:
+        title = html.Div([
+            html.Strong(f.question),
+            html.Span(f"  ·  {f.section}" if f.section else "",
+                      className="text-muted small ms-2"),
+        ])
+        body = html.Div([
+            (html.Div([
+                html.Div("Short answer", className="section-eyebrow"),
+                html.Div(f.answer_short, style={"whiteSpace": "pre-wrap",
+                                                 "marginBottom": "12px"}),
+            ]) if f.answer_short else html.Div()),
+            (html.Div([
+                html.Div("Long answer", className="section-eyebrow"),
+                html.Div(f.answer_long, style={"whiteSpace": "pre-wrap"}),
+            ]) if f.answer_long else html.Div()),
+        ])
+        items.append(dbc.AccordionItem(body, title=title))
+
+    return dbc.Card(dbc.CardBody([
+        html.Div([
+            html.Div(f"FAQs · {len(faqs)} match{'es' if len(faqs) != 1 else ''}",
+                     className="section-eyebrow d-inline"),
+        ], className="mb-2"),
+        dbc.Accordion(items, start_collapsed=True, flush=True,
+                      always_open=False),
+    ]))
+
+
+def _am_render_replies(replies: list) -> html.Div:
+    if not replies:
+        return dbc.Card(dbc.CardBody([
+            html.Div("Past replies", className="section-eyebrow"),
+            html.Em("No past replies match your filters.", className="text-muted"),
+        ]))
+    items = []
+    for c in replies:
+        sentiment_color = _AM_SENTIMENT_COLORS.get((c.sentiment or "").strip(),
+                                                    "secondary")
+        title = html.Div([
+            dbc.Badge(c.platform or "?", color="primary",
+                      className="me-1", style={"fontSize": "0.65rem"}),
+            dbc.Badge((c.sentiment or "?").upper(), color=sentiment_color,
+                      className="me-1", style={"fontSize": "0.65rem"}),
+            dbc.Badge("DM" if c.is_dm else "COMMENT", color="info",
+                      className="me-2", style={"fontSize": "0.65rem"}),
+            html.Span(c.comment[:120] + ("…" if len(c.comment) > 120 else ""),
+                      style={"fontSize": "13px"}),
+            (html.Span(f"  ·  {c.date}", className="text-muted small ms-1")
+             if c.date else html.Span()),
+        ])
+        body = html.Div([
+            html.Div("Incoming", className="section-eyebrow"),
+            html.Div(c.comment, style={"whiteSpace": "pre-wrap",
+                                        "marginBottom": "12px"}),
+            html.Div("Our reply", className="section-eyebrow"),
+            html.Div(c.response, style={"whiteSpace": "pre-wrap",
+                                         "fontStyle": "italic",
+                                         "background": "var(--warren-soft)",
+                                         "padding": "10px 14px",
+                                         "borderRadius": "var(--radius-sm)",
+                                         "border": "1px solid var(--warren-border)"}),
+            (html.Div(f"— @{c.account}" if c.account else "",
+                      className="text-muted small mt-2")),
+        ])
+        items.append(dbc.AccordionItem(body, title=title))
+
+    return dbc.Card(dbc.CardBody([
+        html.Div(f"Past replies · {len(replies)} match{'es' if len(replies) != 1 else ''}",
+                 className="section-eyebrow mb-2"),
+        dbc.Accordion(items, start_collapsed=True, flush=True),
+    ]))
+
+
 def _answer_machine_page():
     try:
         kb = _am_get_kb()
@@ -1754,9 +1980,11 @@ def _answer_machine_page():
         )
         kb_error = None
     except Exception as e:
+        kb = None
         kb_status = dbc.Badge("KB load failed", color="danger", className="me-2")
         kb_error  = str(e)
 
+    # ---- Draft tab ---------------------------------------------------------
     left_pane = html.Div([
         dbc.Card(dbc.CardBody([
             html.Div("Step 1 · Paste the message", className="section-eyebrow"),
@@ -1787,10 +2015,14 @@ def _answer_machine_page():
                     ),
                 ], md=7),
             ], className="g-3"),
-            dbc.Label("Incoming message", className="mt-3"),
+
+            html.Hr(style={"margin": "16px 0"}),
+            _am_template_buttons(),
+
+            dbc.Label("Incoming message", className="mt-2"),
             dbc.Textarea(
                 id="am-message",
-                placeholder="Paste the comment or DM here…",
+                placeholder="Paste the comment or DM here, or pick a template above…",
                 style={"minHeight": "180px", "fontSize": "14px",
                        "fontFamily": "var(--font-body)"},
             ),
@@ -1815,6 +2047,13 @@ def _answer_machine_page():
                                    className="text-muted small p-4 text-center")),
     ], className="create-pane-right")
 
+    draft_tab_body = html.Div([
+        html.Div([left_pane, right_pane], className="create-shell"),
+    ])
+
+    # ---- Browse KB tab -----------------------------------------------------
+    browse_tab_body = _am_kb_browser_layout(kb) if kb else html.Div()
+
     return html.Div([
         _page_header("Answer Machine",
                      "Paste a comment or DM. Get a Warren-tone reply grounded "
@@ -1824,7 +2063,10 @@ def _answer_machine_page():
         # Persists the in-flight draft (incoming message + metadata) across
         # callbacks so the Approve button can write the right exemplar.
         dcc.Store(id="am-current-draft", data=None),
-        html.Div([left_pane, right_pane], className="create-shell"),
+        dbc.Tabs([
+            dbc.Tab(draft_tab_body,  label="✍ Draft a reply",  tab_id="am-tab-draft"),
+            dbc.Tab(browse_tab_body, label="🗂 Browse KB",     tab_id="am-tab-kb"),
+        ], id="am-tabs", active_tab="am-tab-draft", className="mb-3"),
     ])
 
 
@@ -2059,6 +2301,81 @@ def _am_approve(_n, current_reply, sentiment, draft_state):
         ],
         color="success", className="mb-0 py-2 small",
     ), True   # disable the button so it can't be clicked twice on the same draft
+
+
+# --- Template buttons (H) ---------------------------------------------------
+
+@app.callback(
+    Output("am-message",  "value", allow_duplicate=True),
+    Output("am-platform", "value", allow_duplicate=True),
+    Output("am-kind",     "value", allow_duplicate=True),
+    Input({"type": "am-template", "index": dash.ALL}, "n_clicks"),
+    prevent_initial_call=True,
+)
+def _am_template_click(_clicks):
+    """Pattern-matching callback: any template button → pre-fill the input."""
+    triggered = ctx.triggered_id
+    # Pattern-matching callbacks fire with all-None on initial render of the
+    # tab; defend against that and against stale triggers when n_clicks==0.
+    if not triggered or not _clicks or not any(c for c in _clicks if c):
+        return no_update, no_update, no_update
+    idx = triggered.get("index") if isinstance(triggered, dict) else None
+    if idx is None or idx >= len(_AM_TEMPLATES):
+        return no_update, no_update, no_update
+    tpl = _AM_TEMPLATES[idx]
+    return (
+        tpl["message"],
+        tpl.get("platform", no_update),
+        tpl.get("kind", no_update),
+    )
+
+
+# --- KB browser search/filter (I) -------------------------------------------
+
+@app.callback(
+    Output("am-kb-faqs-pane",    "children"),
+    Output("am-kb-replies-pane", "children"),
+    Input("am-kb-search",    "value"),
+    Input("am-kb-section",   "value"),
+    Input("am-kb-platform",  "value"),
+    Input("am-kb-sentiment", "value"),
+    Input("am-tabs",         "active_tab"),
+)
+def _am_kb_filter(query, sections, platforms, sentiments, active_tab):
+    """Render the FAQ + past-reply lists filtered by the search/dropdown state.
+    Re-fires when the tab is activated so first render is correct.
+    """
+    try:
+        kb = _am_get_kb()
+    except Exception as e:
+        msg = dbc.Alert(f"KB load failed: {e}", color="danger")
+        return msg, msg
+
+    q = (query or "").strip().lower()
+    section_set   = set(sections or [])
+    platform_set  = set(platforms or [])
+    sentiment_set = set(sentiments or [])
+
+    def _faq_match(f) -> bool:
+        if section_set and (f.section or "") not in section_set:
+            return False
+        if not q:
+            return True
+        hay = " ".join([f.question, f.answer_short, f.answer_long, f.section]).lower()
+        return q in hay
+
+    def _reply_match(c) -> bool:
+        if platform_set and (c.platform or "") not in platform_set:
+            return False
+        if sentiment_set and (c.sentiment or "") not in sentiment_set:
+            return False
+        if not q:
+            return True
+        return q in (c.comment + " " + c.response).lower()
+
+    faqs    = [f for f in kb.faqs if _faq_match(f)]
+    replies = [c for c in kb.comment_examples if _reply_match(c)]
+    return _am_render_faqs(faqs), _am_render_replies(replies)
 
 
 # ---------------------------------------------------------------------------
