@@ -20,6 +20,9 @@ from dash import Input, Output, State, ctx, dash_table, dcc, html, no_update
 
 from src.answer_machine import (append_exemplar, delete_exemplar, draft_reply,
                                   load_knowledge_base)
+from src.archive import (archive_stats, delete_entry as archive_delete_entry,
+                          get_entry as archive_get_entry,
+                          list_archive)
 from src.blog_generator import generate_blog_post, blog_to_html, blog_to_text
 from src.blog_quality import quick_score as blog_quick_score
 from src.compliance import ensure_compliant, load_rulebook
@@ -178,6 +181,12 @@ SIDEBAR = html.Div([
             active="exact",
             className="sidebar-link fw-semibold",
         ),
+        dbc.NavLink(
+            [html.Span("🗂", className="me-2"), "Archive"],
+            href="/archive",
+            active="exact",
+            className="sidebar-link fw-semibold",
+        ),
     ], vertical=True, pills=True, className="px-3 pt-3"),
 
     html.Div("UK Personal Finance · v1", className="warren-sidebar-footer"),
@@ -220,6 +229,8 @@ def route(pathname):
         return _compliance_page()
     if pathname == "/answer-machine":
         return _answer_machine_page()
+    if pathname == "/archive":
+        return _archive_page()
     return _database_page()
 
 
@@ -1232,6 +1243,32 @@ def _run_generation_job(job_id: str, summaries: list, content_type: str,
             except Exception as e:
                 print(f"Quality scoring failed: {e}")
                 quality = {"error": str(e)}
+
+        # Re-write the JSON sidecar with quality + revision + verification
+        # blocks now that they're computed. The Archive page reads these.
+        json_path = paths.get("json")
+        if json_path and os.path.exists(json_path):
+            try:
+                with open(json_path) as f:
+                    sidecar = json.load(f)
+                if quality and "error" not in (quality or {}):
+                    # Drop the heavy 'raw' analyser dump; the totals are enough.
+                    q_slim = {k: v for k, v in quality.items() if k != "raw"}
+                    sidecar["quality"] = q_slim
+                if quality_revision is not None:
+                    sidecar["quality_revision"] = {
+                        "iterations":     quality_revision.get("iterations"),
+                        "revised":        quality_revision.get("revised"),
+                        "initial_score":  quality_revision.get("initial_score"),
+                        "final_score":    (quality_revision.get("final_score") or {}).get("total"),
+                        "audit":          quality_revision.get("audit"),
+                    }
+                if verification is not None:
+                    sidecar["verification_summary"] = verification.get("summary")
+                with open(json_path, "w") as f:
+                    json.dump(sidecar, f, indent=2, ensure_ascii=False, default=str)
+            except Exception as e:
+                print(f"Could not update JSON sidecar with quality/revision data: {e}")
 
         # --- Build final preview component ----------------------------------
         if kind == "newsletter":
@@ -2796,6 +2833,393 @@ def _am_kb_delete(_submits, platforms, sentiments, query):
         html.Small(f"{n} past replies remain in the KB.", className="text-muted"),
     ], color="success", className="mb-0 py-2 small")
     return _am_render_replies(filtered), toast
+
+
+# ===========================================================================
+# ARCHIVE PAGE — every generated newsletter / blog, browsable
+# ===========================================================================
+
+_AR_GRADE_COLORS = {"pass": "success", "warn": "warning", "fail": "danger"}
+_AR_KIND_ICON   = {"blog": "📝", "newsletter": "✉"}
+_AR_FORMAT_META = _FORMAT_META   # reuse Create page's per-format colour map
+
+
+def _ar_quality_badge(score, grade):
+    """Inline quality-score badge (0-100). Hidden when no score."""
+    if score is None:
+        return html.Span("—", className="text-muted")
+    color = ("success" if score >= 80
+             else "warning" if score >= 60 else "danger")
+    return dbc.Badge(f"{score}/100",
+                     color=color, className="me-1",
+                     style={"fontSize": "0.7rem"},
+                     title=grade or "")
+
+
+def _ar_compliance_badge(grade, pass_rate):
+    if not grade:
+        return html.Span("—", className="text-muted")
+    color = _AR_GRADE_COLORS.get(grade, "secondary")
+    label = grade.upper()
+    if pass_rate is not None:
+        label += f"  {int(pass_rate*100)}%"
+    return dbc.Badge(label, color=color, style={"fontSize": "0.7rem"})
+
+
+def _ar_format_pill_row(paths: dict) -> html.Span:
+    """Inline coloured pills for each format on the row, each a download link."""
+    bits = []
+    for ext in _FORMAT_ORDER:
+        if ext not in paths:
+            continue
+        label, color, tip = _AR_FORMAT_META[ext]
+        fname = os.path.basename(paths[ext])
+        bits.append(
+            html.A(label.split(" ", 1)[0],   # just the icon, not the word
+                   href=f"/downloads/{fname}",
+                   download=fname,
+                   title=f"{label} — {tip}",
+                   className=f"badge bg-{color} me-1 text-decoration-none",
+                   style={"fontSize": "0.65rem", "padding": "4px 6px"})
+        )
+    return html.Span(bits)
+
+
+def _archive_page():
+    cfg_local = cfg
+    entries = list_archive(cfg_local.output_dir)
+    stats = archive_stats(entries)
+
+    # ---- Stats strip ---------------------------------------------------
+    stat_row = dbc.Row([
+        dbc.Col(_stat_card("Total generations",  str(stats["total"]),  "primary"),  md=3),
+        dbc.Col(_stat_card("Blog posts",
+                            str(stats["by_kind"].get("blog", 0)), "info"), md=3),
+        dbc.Col(_stat_card("Newsletters",
+                            str(stats["by_kind"].get("newsletter", 0)), "info"), md=3),
+        dbc.Col(_stat_card(
+            "Avg compliance pass-rate",
+            (f"{int(stats['avg_compliance_pass_rate']*100)}%"
+             if stats["avg_compliance_pass_rate"] is not None else "—"),
+            "success",
+        ), md=3),
+    ], className="mb-3 g-3")
+
+    # ---- Filter strip --------------------------------------------------
+    filter_card = dbc.Card(dbc.CardBody([
+        html.Div("Filter", className="section-eyebrow"),
+        dbc.Row([
+            dbc.Col([
+                dbc.Label("Search title"),
+                dbc.Input(id="ar-search", type="text",
+                          placeholder="e.g. ISA, pension, FCA…",
+                          debounce=True, n_submit=0),
+            ], md=5),
+            dbc.Col([
+                dbc.Label("Kind"),
+                dcc.Dropdown(id="ar-kind",
+                             options=[
+                                 {"label": "All",         "value": "all"},
+                                 {"label": "Blog posts",  "value": "blog"},
+                                 {"label": "Newsletters", "value": "newsletter"},
+                             ],
+                             value="all", clearable=False),
+            ], md=2),
+            dbc.Col([
+                dbc.Label("From date"),
+                dbc.Input(id="ar-from", type="date"),
+            ], md=2),
+            dbc.Col([
+                dbc.Label("To date"),
+                dbc.Input(id="ar-to",   type="date"),
+            ], md=2),
+            dbc.Col([
+                dbc.Button("✕  Clear", id="ar-reset", color="light",
+                            outline=True, size="sm",
+                            style={"marginTop": "30px"}),
+            ], md=1),
+        ], className="g-3"),
+    ]), className="mb-3")
+
+    # ---- Initial table render -----------------------------------------
+    table = _ar_render_table(entries)
+
+    return html.Div([
+        _page_header("Archive",
+                     "Every generated newsletter and blog, browsable, "
+                     "downloadable, and previewable in place."),
+        stat_row,
+        filter_card,
+        # Toast slot for the delete callback
+        html.Div(id="ar-status", className="mb-2"),
+        # Table + preview pane in their own divs so search and click can
+        # update them independently without re-rendering the filter strip.
+        html.Div(table, id="ar-table-pane"),
+        html.Div(id="ar-preview-pane", className="mt-3"),
+    ])
+
+
+def _ar_render_table(entries: list) -> html.Div:
+    if not entries:
+        return dbc.Alert(
+            "No matching generations. Adjust the filters or generate something on the Create page.",
+            color="info", className="mb-0",
+        )
+    rows = []
+    for e in entries:
+        rows.append(html.Tr([
+            html.Td(_AR_KIND_ICON.get(e.kind, "•"),
+                    style={"width": "30px", "textAlign": "center"}),
+            html.Td([
+                html.Div(e.title, className="fw-semibold",
+                         style={"fontSize": "13px"}),
+                html.Small(e.basename, className="text-muted",
+                           style={"fontSize": "11px"}),
+            ]),
+            html.Td(html.Small(e.date, className="text-muted"),
+                    style={"width": "100px"}),
+            html.Td(_ar_compliance_badge(e.compliance_grade, e.compliance_pass_rate),
+                    style={"width": "120px", "textAlign": "center"}),
+            html.Td(_ar_quality_badge(e.quality_score, e.quality_grade),
+                    style={"width": "90px",  "textAlign": "center"}),
+            html.Td(_ar_format_pill_row(e.paths),
+                    style={"width": "200px"}),
+            html.Td([
+                dbc.Button("Preview",
+                           id={"type": "ar-preview-btn", "basename": e.basename},
+                           color="primary", size="sm", outline=True,
+                           className="me-1", n_clicks=0),
+                dcc.ConfirmDialogProvider(
+                    children=dbc.Button(
+                        "🗑", color="danger", size="sm", outline=True,
+                        title="Delete this generation (all formats)",
+                    ),
+                    id={"type": "ar-delete", "basename": e.basename},
+                    message=(f"Delete every file for '{e.basename}'?\n\n"
+                             "This removes the .html, .pdf, .docx, .md, .eml, "
+                             ".txt and .json — and cannot be undone."),
+                ),
+            ], style={"width": "150px", "textAlign": "right"}),
+        ]))
+    return dbc.Card(dbc.CardBody([
+        html.Div(f"{len(entries)} generation(s)",
+                 className="section-eyebrow mb-2"),
+        dbc.Table(
+            [html.Thead(html.Tr([
+                html.Th(""),
+                html.Th("Title"),
+                html.Th("Date"),
+                html.Th("Compliance", style={"textAlign": "center"}),
+                html.Th("Quality",    style={"textAlign": "center"}),
+                html.Th("Formats"),
+                html.Th("",            style={"textAlign": "right"}),
+            ])),
+             html.Tbody(rows)],
+            hover=True, size="sm", striped=False,
+            className="mb-0 align-middle",
+        ),
+    ]))
+
+
+# --- Filter callback --------------------------------------------------------
+
+@app.callback(
+    Output("ar-table-pane",   "children"),
+    Output("ar-search",       "value"),
+    Output("ar-kind",         "value"),
+    Output("ar-from",         "value"),
+    Output("ar-to",           "value"),
+    Input("ar-search",        "value"),
+    Input("ar-search",        "n_submit"),
+    Input("ar-kind",          "value"),
+    Input("ar-from",          "value"),
+    Input("ar-to",            "value"),
+    Input("ar-reset",         "n_clicks"),
+    prevent_initial_call=True,
+)
+def _ar_filter(query, _enter, kind, date_from, date_to, _reset):
+    trig = ctx.triggered_id
+    if trig == "ar-reset":
+        # Wipe filters and re-render full archive.
+        entries = list_archive(cfg.output_dir)
+        return _ar_render_table(entries), "", "all", None, None
+    entries = list_archive(
+        cfg.output_dir,
+        kind=(kind if kind and kind != "all" else None),
+        query=query or None,
+        date_from=date_from or None,
+        date_to=date_to or None,
+    )
+    return (_ar_render_table(entries),
+            no_update, no_update, no_update, no_update)
+
+
+# --- Preview a single entry inline -----------------------------------------
+
+@app.callback(
+    Output("ar-preview-pane", "children"),
+    Input({"type": "ar-preview-btn", "basename": dash.ALL}, "n_clicks"),
+    prevent_initial_call=True,
+)
+def _ar_preview(_clicks):
+    triggered = ctx.triggered_id
+    if not triggered or not _clicks or not any(c for c in _clicks if c):
+        return no_update
+    if not isinstance(triggered, dict):
+        return no_update
+    basename = triggered.get("basename")
+    if not basename:
+        return no_update
+
+    entry = archive_get_entry(cfg.output_dir, basename)
+    if not entry:
+        return dbc.Alert(f"Entry '{basename}' not found.",
+                          color="warning", className="mb-0")
+
+    # Read HTML for the iframe.
+    html_path = entry.paths.get("html")
+    preview_html = ""
+    if html_path:
+        try:
+            with open(html_path) as f:
+                preview_html = f.read()
+        except OSError:
+            preview_html = "<p>Could not load HTML preview.</p>"
+
+    download_buttons = []
+    for ext in _FORMAT_ORDER:
+        p = entry.paths.get(ext)
+        if not p:
+            continue
+        label, color, tip = _AR_FORMAT_META[ext]
+        fname = os.path.basename(p)
+        download_buttons.append(dbc.Button(
+            label, href=f"/downloads/{fname}", external_link=True,
+            download=fname, color=color, size="sm",
+            className="me-2 mb-2", title=tip,
+        ))
+
+    info_rows = [
+        ("Kind",         entry.kind.title()),
+        ("Generated at", entry.generated_at[:19].replace("T", " ")
+                          if entry.generated_at else "—"),
+        ("Date / version", f"{entry.date} · v{entry.version}"),
+        ("Input articles", str(entry.input_article_count)),
+        ("Sections",     str(entry.sections_count)),
+    ]
+    if entry.kind == "blog":
+        info_rows += [
+            ("Word count",          str(entry.word_count or "—")),
+            ("Sources cited",       str(entry.sources_cited_count)),
+            ("Quality score",
+             (f"{entry.quality_score}/100  ({entry.quality_grade})"
+              if entry.quality_score is not None else "—")),
+        ]
+    info_rows.append((
+        "Compliance",
+        (f"{(entry.compliance_grade or '?').upper()}  "
+         f"({int((entry.compliance_pass_rate or 0)*100)}% pass)"
+         if entry.compliance_grade else "—"),
+    ))
+
+    info_table = dbc.Table([
+        html.Tbody([
+            html.Tr([
+                html.Td(label, className="text-muted small",
+                        style={"width": "150px"}),
+                html.Td(value, style={"fontSize": "13px"}),
+            ]) for label, value in info_rows
+        ])
+    ], borderless=True, size="sm", className="mb-0")
+
+    return dbc.Card(dbc.CardBody([
+        dbc.Row([
+            dbc.Col([
+                html.Div([
+                    html.Span(_AR_KIND_ICON.get(entry.kind, "•"),
+                              style={"fontSize": "1.4rem", "marginRight": "8px"}),
+                    html.Strong(entry.title, style={"fontSize": "16px"}),
+                ]),
+                html.Small(entry.basename, className="text-muted"),
+            ], md=10),
+            dbc.Col([
+                dbc.Button("✕", id="ar-preview-close",
+                            color="light", size="sm",
+                            className="float-end", n_clicks=0),
+                dbc.Tooltip("Close the preview", target="ar-preview-close",
+                            placement="left"),
+            ], md=2),
+        ], className="mb-3"),
+        html.Div("Download as:", className="text-muted small mb-1"),
+        html.Div(download_buttons, className="mb-3"),
+        dbc.Row([
+            dbc.Col(info_table, md=4),
+            dbc.Col(html.Iframe(
+                srcDoc=preview_html,
+                style={"width": "100%", "height": "640px",
+                       "border": "1px solid var(--warren-border)",
+                       "borderRadius": "var(--radius)",
+                       "background": "#ffffff"},
+            ), md=8),
+        ]),
+    ]), className="shadow-sm",
+        style={"borderLeft": "4px solid var(--bs-primary)"})
+
+
+@app.callback(
+    Output("ar-preview-pane", "children", allow_duplicate=True),
+    Input("ar-preview-close", "n_clicks"),
+    prevent_initial_call=True,
+)
+def _ar_preview_close(_n):
+    return None if _n else no_update
+
+
+# --- Delete an archived generation -----------------------------------------
+
+@app.callback(
+    Output("ar-table-pane", "children", allow_duplicate=True),
+    Output("ar-status",     "children"),
+    Output("ar-preview-pane","children", allow_duplicate=True),
+    Input({"type": "ar-delete", "basename": dash.ALL}, "submit_n_clicks"),
+    State("ar-search", "value"),
+    State("ar-kind",   "value"),
+    State("ar-from",   "value"),
+    State("ar-to",     "value"),
+    prevent_initial_call=True,
+)
+def _ar_delete(_submits, query, kind, date_from, date_to):
+    triggered = ctx.triggered_id
+    if not triggered or not _submits or not any(s for s in _submits if s):
+        return no_update, no_update, no_update
+    if not isinstance(triggered, dict):
+        return no_update, no_update, no_update
+    basename = triggered.get("basename")
+    if not basename:
+        return no_update, no_update, no_update
+
+    result = archive_delete_entry(cfg.output_dir, basename)
+    if not result.get("ok"):
+        return (no_update,
+                dbc.Alert(f"⚠ Delete failed: {result.get('error', 'unknown')}",
+                          color="danger", className="mb-0 py-2 small"),
+                no_update)
+
+    # Re-render with current filters honoured.
+    entries = list_archive(
+        cfg.output_dir,
+        kind=(kind if kind and kind != "all" else None),
+        query=query or None,
+        date_from=date_from or None,
+        date_to=date_to or None,
+    )
+    toast = dbc.Alert([
+        html.Strong("✓ Deleted "), html.Code(basename),
+        html.Small(f"  ({result['count']} files removed)",
+                   className="text-muted ms-2"),
+    ], color="success", className="mb-0 py-2 small")
+    # Close the preview pane in case it was showing the just-deleted entry.
+    return _ar_render_table(entries), toast, None
 
 
 # ---------------------------------------------------------------------------
