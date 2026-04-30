@@ -27,9 +27,11 @@ from src.compliance.pipeline import init_compliance_tables
 from src.config import build_anthropic_client, load_config
 from src.database import get_connection, init_db, query_articles
 from src.exporters import to_pdf, to_docx, to_markdown, to_eml
+from src.blog_quality_revision import revise_for_quality
 from src.formatter import to_html, to_text
 from src.generator import generate_newsletter
 from src.internal_links import load_published_corpus
+from src.source_verifier import summarise as verify_summarise, verify_urls
 
 # ---------------------------------------------------------------------------
 # Bootstrap
@@ -804,9 +806,27 @@ def _create_page():
             dcc.Store(id="cr-content-type", data=None),
         ]), className="mb-3"),
 
-        # Step 3 — sticky generate bar
+        # Step 3 — optional editor's angle (priority framing)
+        dbc.Card(dbc.CardBody([
+            html.Div("Step 3 · Editor's angle (optional)", className="section-eyebrow"),
+            dbc.Textarea(
+                id="cr-angle",
+                placeholder=("Optional: a 1–2 sentence brief telling the LLM how "
+                             "to frame the piece.\n"
+                             "e.g. 'Lead with the Bank of England rate cut and "
+                             "what it means for first-time buyers.'"),
+                style={"minHeight": "70px", "fontSize": "13px",
+                       "fontFamily": "var(--font-body)"},
+            ),
+            html.Small(
+                "Leave blank to let the LLM pick the angle from the article mix.",
+                className="text-muted",
+            ),
+        ]), className="mb-3"),
+
+        # Step 4 — sticky generate bar
         html.Div([
-            html.Div("Step 3 · Generate", className="section-eyebrow",
+            html.Div("Step 4 · Generate", className="section-eyebrow",
                      style={"color": "rgba(255,255,255,0.7)"}),
             dbc.Button("⚡  Generate", id="cr-generate-btn", disabled=True),
             html.Div(id="cr-generate-hint", className="hint",
@@ -942,12 +962,14 @@ _jobs_lock = threading.Lock()
 
 # Stage labels shown in the progress card. Must match what the worker sets.
 _STAGES = [
-    ("collect",    "Loading article context"),
-    ("draft",      "Drafting with Claude"),
-    ("compliance", "Compliance grading + revision"),
-    ("export",     "Rendering PDF, DOCX, Markdown, EML"),
-    ("quality",    "Scoring on 100-pt rubric (blog only)"),
-    ("done",       "Done"),
+    ("collect",      "Loading article context"),
+    ("draft",        "Drafting with Claude"),
+    ("verify",       "Verifying source URLs"),
+    ("quality_loop", "Quality-revision loop (blog only)"),
+    ("compliance",   "Compliance grading + revision"),
+    ("export",       "Rendering PDF, DOCX, Markdown, EML"),
+    ("quality",      "Final 100-pt rubric score"),
+    ("done",         "Done"),
 ]
 
 
@@ -1087,15 +1109,20 @@ def _write_all_formats(base: str, *, kind: str, result: dict, html_str: str,
     return paths
 
 
-def _run_generation_job(job_id: str, summaries: list, content_type: str) -> None:
+def _run_generation_job(job_id: str, summaries: list, content_type: str,
+                        *, editor_angle: str | None = None) -> None:
     """Heavy work: LLM draft → compliance → multi-format export. Runs in a thread."""
     try:
         client = build_anthropic_client(cfg)
         os.makedirs(cfg.output_dir, exist_ok=True)
 
-        _set_stage(job_id, "draft", sub=f"{content_type} from {len(summaries)} article(s)")
+        sub = f"{content_type} from {len(summaries)} article(s)"
+        if editor_angle:
+            sub += f" · angle: {editor_angle[:50]}…" if len(editor_angle) > 50 else f" · angle set"
+        _set_stage(job_id, "draft", sub=sub)
         if content_type == "newsletter":
-            result = generate_newsletter(summaries, client, cfg.anthropic_model)
+            result = generate_newsletter(summaries, client, cfg.anthropic_model,
+                                          editor_angle=editor_angle)
             if not result:
                 raise RuntimeError("Newsletter generation returned no content.")
             out_html, out_text = to_html(result), to_text(result)
@@ -1110,6 +1137,8 @@ def _run_generation_job(job_id: str, summaries: list, content_type: str) -> None
             result = generate_blog_post(
                 summaries, client, cfg.anthropic_model,
                 existing_posts=existing_corpus,
+                editor_angle=editor_angle,
+                progress_cb=lambda s: _set_stage(job_id, "draft", sub=s),
             )
             if not result:
                 raise RuntimeError("Blog post generation returned no content.")
@@ -1119,6 +1148,54 @@ def _run_generation_job(job_id: str, summaries: list, content_type: str) -> None
             kind = "blog"
         else:
             raise RuntimeError(f"Unknown content type: {content_type}")
+
+        # --- Source verification (catches LLM-hallucinated URLs) ------------
+        verification = None
+        try:
+            urls_to_check = []
+            if kind == "blog":
+                urls_to_check.extend(s.get("url", "")
+                                     for s in (result.get("sources_cited") or []))
+            if kind == "newsletter":
+                ep = result.get("editor_pick") or {}
+                if ep.get("url"):
+                    urls_to_check.append(ep["url"])
+                for s in result.get("sections", []) or []:
+                    for a in s.get("articles", []) or []:
+                        if a.get("url"):
+                            urls_to_check.append(a["url"])
+            urls_to_check = [u for u in urls_to_check if u]
+            if urls_to_check:
+                _set_stage(job_id, "verify",
+                            sub=f"checking {len(urls_to_check)} URL(s)")
+                records = verify_urls(urls_to_check, timeout=5)
+                summary = verify_summarise(records)
+                verification = {"records": records, "summary": summary,
+                                 "checked": urls_to_check}
+        except Exception as e:
+            print(f"Source verification failed (non-fatal): {e}")
+            verification = {"records": {}, "summary": {"total": 0, "ok": 0, "bad": 0,
+                                                         "all_ok": True},
+                             "checked": [], "error": str(e)}
+
+        # --- Quality-revision loop (blog only) ------------------------------
+        quality_revision = None
+        if kind == "blog":
+            _set_stage(job_id, "quality_loop", sub="scoring + revising weakest category")
+            try:
+                quality_revision = revise_for_quality(
+                    result, client=client, model=cfg.anthropic_model, kind="blog",
+                    target_score=78, max_iterations=2,
+                    progress_cb=lambda s: _set_stage(job_id, "quality_loop", sub=s),
+                )
+                if quality_revision.get("revised"):
+                    # The loop produced a higher-scoring draft — adopt it.
+                    result = quality_revision["final_post"]
+                    out_html = blog_to_html(result)
+                    out_text = blog_to_text(result)
+            except Exception as e:
+                print(f"Quality-revision loop failed (non-fatal): {e}")
+                quality_revision = {"error": str(e), "revised": False, "audit": []}
 
         _set_stage(job_id, "compliance")
         conn_c = get_connection(cfg.db_path)
@@ -1169,7 +1246,8 @@ def _run_generation_job(job_id: str, summaries: list, content_type: str) -> None
                 for s in result.get("sections", [])
             ]
             preview = _content_preview("✉️ Newsletter Generated", subject,
-                                        paths, out_html, sections_list, compliance)
+                                        paths, out_html, sections_list, compliance,
+                                        verification=verification)
         else:
             meta_list = []
             rt = result.get("reading_time_minutes")
@@ -1184,7 +1262,8 @@ def _run_generation_job(job_id: str, summaries: list, content_type: str) -> None
             if result.get("seo_tags"):      meta_list.append(dbc.ListGroupItem("🏷️ " + " ".join(f"#{t}" for t in result["seo_tags"])))
             preview = _content_preview("📝 Blog Post Generated", subject,
                                         paths, out_html, meta_list, compliance,
-                                        quality=quality)
+                                        quality=quality, verification=verification,
+                                        quality_revision=quality_revision)
 
         with _jobs_lock:
             _jobs[job_id]["stage"]      = "done"
@@ -1206,9 +1285,10 @@ def _run_generation_job(job_id: str, summaries: list, content_type: str) -> None
     State("cr-table",         "selected_rows"),
     State("cr-table",         "data"),
     State("cr-content-type",  "data"),
+    State("cr-angle",         "value"),
     prevent_initial_call=True,
 )
-def kickoff_generation(_, selected_rows, table_data, content_type):
+def kickoff_generation(_, selected_rows, table_data, content_type, editor_angle):
     if not selected_rows or not table_data or not content_type:
         return (dbc.Alert("Nothing to generate — check your selections.",
                           color="warning"),
@@ -1236,6 +1316,7 @@ def kickoff_generation(_, selected_rows, table_data, content_type):
 
     summaries = _build_summaries(rows_df, raw_by_id)
     job_id = uuid.uuid4().hex[:12]
+    angle = (editor_angle or "").strip() or None
     with _jobs_lock:
         _jobs[job_id] = {
             "stage": "collect", "sub": "", "started_at": time.time(),
@@ -1243,6 +1324,7 @@ def kickoff_generation(_, selected_rows, table_data, content_type):
         }
     threading.Thread(target=_run_generation_job,
                      args=(job_id, summaries, content_type),
+                     kwargs={"editor_angle": angle},
                      daemon=True).start()
     return _progress_card(job_id), job_id, False, True
 
@@ -1368,6 +1450,173 @@ def _compliance_card(compliance: dict) -> dbc.Card:
             ], title="View compliance details"),
         ], start_collapsed=True, flush=True),
     ]), className="shadow-sm mb-3", style={"borderLeft": f"4px solid var(--bs-{color})"})
+
+
+def _quality_revision_card(rev: dict | None) -> html.Div:
+    """Render the audit trail of the quality-driven revision loop."""
+    if not rev:
+        return html.Div()
+    if rev.get("error"):
+        return dbc.Alert(f"Quality-revision loop errored: {rev['error']}",
+                          color="warning", className="mb-3")
+    audit = rev.get("audit", []) or []
+    if not audit:
+        return html.Div()
+
+    initial = rev.get("initial_score") or 0
+    final   = (rev.get("final_score") or {}).get("total", initial)
+    iters   = rev.get("iterations", 0)
+    revised = rev.get("revised", False)
+    delta   = final - initial
+    if delta > 0:
+        delta_str = f"+{delta} pts"
+        color = "success"
+        icon = "📈"
+    elif delta == 0:
+        delta_str = "no change"
+        color = "secondary"
+        icon = "—"
+    else:
+        delta_str = f"{delta} pts"
+        color = "warning"
+        icon = "↘"
+
+    audit_items = []
+    for entry in audit:
+        i = entry.get("iteration", 0)
+        total = entry.get("total", 0)
+        cat = entry.get("target_category")
+        if i == 0:
+            audit_items.append(html.Li([
+                html.Strong("Initial draft "),
+                dbc.Badge(f"{total}/100", color="secondary",
+                          className="ms-1", style={"fontSize": "0.7rem"}),
+            ], style={"marginBottom": "8px"}))
+        else:
+            improved = entry.get("improved", False)
+            cat_label = {
+                "content":   "Content Quality",
+                "seo":       "SEO Optimization",
+                "eeat":      "E-E-A-T Signals",
+                "technical": "Technical Elements",
+                "ai":        "AI Citation Readiness",
+            }.get(cat, cat or "?")
+            changes = entry.get("changes") or []
+            audit_items.append(html.Li([
+                html.Div([
+                    html.Strong(f"Iteration {i} → "),
+                    dbc.Badge(f"{total}/100",
+                              color="success" if improved else "warning",
+                              className="ms-1", style={"fontSize": "0.7rem"}),
+                    html.Span(f"  ·  Target: {cat_label}",
+                              className="text-muted ms-2",
+                              style={"fontSize": "0.85rem"}),
+                    html.Span(("  ·  ✓ adopted" if improved
+                               else "  ·  ✗ no improvement, kept previous"),
+                              className=("text-success" if improved else "text-warning"),
+                              style={"fontSize": "0.8rem"}),
+                ], className="mb-2"),
+                html.Ul(
+                    [html.Li(c, style={"fontSize": "13px",
+                                        "marginBottom": "4px"})
+                     for c in changes[:8]],
+                    style={"marginTop": "4px"},
+                ) if changes else html.Div(),
+            ], style={"marginBottom": "10px"}))
+
+    return dbc.Card(dbc.CardBody([
+        dbc.Row([
+            dbc.Col([
+                html.Span(icon, style={"fontSize": "1.4rem"}),
+                html.Span("  Quality revision: ", className="ms-2"),
+                dbc.Badge(f"{initial} → {final}/100",
+                          color=color, className="ms-1",
+                          style={"fontSize": "0.85rem"}),
+                html.Span(f"  ({delta_str})",
+                          className="text-muted ms-1",
+                          style={"fontSize": "0.85rem"}),
+            ], md=8),
+            dbc.Col([
+                dbc.Badge(f"{iters} iteration{'s' if iters != 1 else ''}"
+                          + ("" if revised else " · no rewrite"),
+                          color="info" if revised else "light",
+                          className="float-end"),
+            ], md=4),
+        ], className="mb-2"),
+        dbc.Accordion([
+            dbc.AccordionItem(
+                html.Ol(audit_items, style={"fontSize": "13px"}),
+                title="View revision audit trail",
+            ),
+        ], start_collapsed=True, flush=True),
+    ]), className="shadow-sm mb-3",
+        style={"borderLeft": f"4px solid var(--bs-{color})"})
+
+
+def _verification_card(verification: dict | None) -> html.Div:
+    """Render the source-URL verification result.
+    Hidden when nothing was checked (e.g. no sources_cited)."""
+    if not verification:
+        return html.Div()
+    summary = verification.get("summary", {}) or {}
+    records = verification.get("records", {}) or {}
+    if summary.get("total", 0) == 0:
+        return html.Div()  # nothing was checked, no card
+
+    bad = summary.get("bad", 0)
+    total = summary.get("total", 0)
+    color = "success" if bad == 0 else ("warning" if bad / max(total, 1) <= 0.3 else "danger")
+    icon  = "✅" if bad == 0 else ("⚠️" if color == "warning" else "❌")
+
+    bad_records = [(u, r) for u, r in records.items() if r.get("status") != "ok"]
+    sev_color = {
+        "404": "danger", "4xx": "danger", "5xx": "danger",
+        "timeout": "warning", "ssl": "warning", "unreachable": "warning",
+        "invalid": "warning", "error": "warning",
+    }
+    bad_items = [
+        html.Li([
+            dbc.Badge((r.get("status") or "?").upper(),
+                      color=sev_color.get(r.get("status"), "secondary"),
+                      className="me-2", style={"fontSize": "0.65rem"}),
+            html.A(u, href=u, target="_blank",
+                   style={"fontSize": "12px",
+                          "wordBreak": "break-all",
+                          "color": "var(--warren-info)"}),
+            html.Br(),
+            html.Small(f"HTTP {r.get('http_code')} · {r.get('error') or ''}",
+                       className="text-muted"),
+        ], style={"marginBottom": "8px", "fontSize": "13px"})
+        for u, r in bad_records[:10]
+    ]
+
+    return dbc.Card(dbc.CardBody([
+        dbc.Row([
+            dbc.Col([
+                html.Span(icon, style={"fontSize": "1.4rem"}),
+                html.Span("  Source verification: ", className="ms-2"),
+                dbc.Badge(f"{summary['ok']} / {total} OK",
+                          color=color, className="ms-1",
+                          style={"fontSize": "0.85rem"}),
+            ], md=8),
+            dbc.Col([
+                (html.Small(f"{bad} unreachable",
+                            className="text-danger float-end")
+                 if bad else html.Small("All cited URLs respond.",
+                                         className="text-success float-end")),
+            ], md=4),
+        ], className="mb-2"),
+
+        (dbc.Accordion([
+            dbc.AccordionItem([
+                html.Ul(bad_items),
+                html.Small(("Action: open the failing URLs above and either fix "
+                            "them in the result or remove the citation before publishing."),
+                           className="text-muted"),
+            ], title=f"View {len(bad_records)} failing URL(s)"),
+        ], start_collapsed=True, flush=True) if bad_records else html.Div()),
+    ]), className="shadow-sm mb-3",
+        style={"borderLeft": f"4px solid var(--bs-{color})"})
 
 
 def _quality_card(quality: dict) -> dbc.Card:
@@ -1504,7 +1753,9 @@ def _download_bar(paths: dict) -> html.Div:
 def _content_preview(badge_title: str, content_title: str,
                      paths: dict, preview_html: str, meta_items: list,
                      compliance: dict | None = None,
-                     quality: dict | None = None) -> html.Div:
+                     quality: dict | None = None,
+                     verification: dict | None = None,
+                     quality_revision: dict | None = None) -> html.Div:
     primary = paths.get("html") or next(iter(paths.values()), "")
     return html.Div([
         dbc.Alert([
@@ -1517,6 +1768,8 @@ def _content_preview(badge_title: str, content_title: str,
             ]),
         ], color="success", className="mb-3"),
         _download_bar(paths),
+        _verification_card(verification) if verification else html.Div(),
+        _quality_revision_card(quality_revision) if quality_revision else html.Div(),
         _compliance_card(compliance) if compliance else html.Div(),
         _quality_card(quality) if quality else html.Div(),
         dbc.Row([

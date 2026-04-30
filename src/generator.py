@@ -9,6 +9,7 @@ from typing import List, Optional
 import anthropic
 
 from ._json import parse_json_response
+from .brand_voice import voice_block
 
 log = logging.getLogger(__name__)
 
@@ -51,12 +52,15 @@ def _dedupe_sections(sections: List[dict]) -> List[dict]:
             cleaned.append(s)
     return cleaned
 
-SYSTEM_PROMPT = (
-    "You are the editor-in-chief of a premium UK personal-finance newsletter "
+_EDITOR_PERSONA = (
+    "You are the editor-in-chief of Warren's UK personal-finance newsletter "
     "read by professionals, business owners, and engaged retail investors. "
     "Your voice is authoritative, plain-spoken, lightly witty, and never sales-y. "
     "You return ONLY valid JSON. No markdown fences, no prose outside the JSON object."
 )
+
+# Backward-compat alias for any external callers that import SYSTEM_PROMPT.
+SYSTEM_PROMPT = _EDITOR_PERSONA
 
 USER_TEMPLATE = """Compose this edition of the UK personal-finance newsletter from the article records below.
 
@@ -64,7 +68,7 @@ Each input article carries: title, url, source, published_at, category, relevanc
 a `summary` (2-3 sentences), `key_points` (3-5 bullets), and an `excerpt` (raw text from
 the original article). USE the key_points and excerpt — do not just paraphrase the summary.
 
-{diversity_note}
+{diversity_note}{angle_note}
 Today's edition date is: {today_human}. Use this when you need to refer to "today".
 
 Return a JSON object that EXACTLY matches this schema (do not add or omit keys):
@@ -111,7 +115,8 @@ Article records (JSON):
 
 
 def generate_newsletter(
-    article_summaries: List[dict], client: anthropic.Anthropic, model: str
+    article_summaries: List[dict], client: anthropic.Anthropic, model: str,
+    *, editor_angle: Optional[str] = None,
 ) -> Optional[dict]:
     if not article_summaries:
         return None
@@ -122,16 +127,29 @@ def generate_newsletter(
     if diversity_note:
         diversity_note = f"⚠ {diversity_note}\n"
 
+    angle_note = ""
+    if editor_angle and editor_angle.strip():
+        angle_note = (
+            "\n★ EDITOR'S ANGLE (priority framing — use this as the lens for the "
+            f"whole edition, including the editor_pick): {editor_angle.strip()}\n"
+        )
+
     prompt = USER_TEMPLATE.format(
         articles_json=json.dumps(article_summaries, ensure_ascii=False, indent=2),
         today_human=today_human,
         diversity_note=diversity_note,
+        angle_note=angle_note,
     )
     try:
         resp = client.messages.create(
             model=model,
             max_tokens=6000,
-            system=SYSTEM_PROMPT,
+            system=[
+                {"type": "text",
+                 "text": voice_block(include_past_replies=True, max_replies=6),
+                 "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": _EDITOR_PERSONA},
+            ],
             messages=[{"role": "user", "content": prompt}],
         )
         text = resp.content[0].text

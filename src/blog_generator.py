@@ -11,6 +11,7 @@ from typing import List, Optional
 import anthropic
 
 from ._json import parse_json_response
+from .brand_voice import voice_block
 
 log = logging.getLogger(__name__)
 
@@ -45,12 +46,23 @@ def _compute_reading_time(post: dict) -> int:
     wc = _word_count(post)
     return max(3, min(25, round(wc / 220)))
 
-SYSTEM_PROMPT = (
+_JOURNALIST_PERSONA = (
     "You are a senior UK personal-finance journalist with 15 years at outlets like the FT and MoneyWeek. "
     "You synthesise — never paraphrase — and your analysis carries practical implications "
     "for British readers managing mortgages, ISAs, pensions, tax, and savings. "
     "You return ONLY valid JSON. No markdown fences, no prose outside the JSON object."
 )
+
+
+def _system_prompt() -> str:
+    """Brand-voice prelude + journalist persona. Resolved at call time so KB
+    edits propagate without a process restart."""
+    return voice_block(include_past_replies=True, max_replies=6) + "\n\n" + _JOURNALIST_PERSONA
+
+
+# Kept for backward compat — anything importing SYSTEM_PROMPT gets the
+# journalist persona only (without the dynamic voice block).
+SYSTEM_PROMPT = _JOURNALIST_PERSONA
 
 USER_TEMPLATE = """Write a long-form UK personal-finance blog post synthesising the article records below.
 
@@ -59,7 +71,7 @@ a `summary`, `key_points` (3-5 bullets), and an `excerpt` (raw text from the ori
 USE the key_points and excerpt — synthesise across them, do not paraphrase a single
 summary. Attribute facts to their original source.
 
-{diversity_note}
+{diversity_note}{angle_note}
 Today's publication date is: {today_human}.
 
 Return a JSON object that EXACTLY matches this schema (do not add or omit keys):
@@ -147,12 +159,128 @@ Article records (JSON):
 """
 
 
+# ---------------------------------------------------------------------------
+# Pass 1 — outline. A small, structured plan the draft pass fills in.
+# ---------------------------------------------------------------------------
+
+_OUTLINE_TEMPLATE = """Plan the blog post — DO NOT WRITE IT YET.
+
+You'll see article records below. Produce a tight structural outline that
+the draft pass will fill in. Aim for 4–6 sections, each one earning its
+place. Rule of thumb: every section advances a distinct claim, no filler.
+
+{angle_note}
+Today is {today_human}. Today's UK personal-finance reader is the audience.
+
+Return ONE JSON object with this exact shape:
+{{
+  "working_title":   "string (working headline, can refine in draft pass)",
+  "thesis":          "string (the single argument the whole post defends, 1 sentence)",
+  "audience_note":   "string (1 sentence on who this serves and what they get from reading)",
+  "sections": [
+    {{
+      "heading":     "string (H2-style)",
+      "claim":       "string (the one thing this section proves, 1 sentence)",
+      "key_points":  ["string", "string", "..."],
+      "sources_to_use": ["url-from-input or 'general knowledge'", "..."]
+    }}
+  ],
+  "must_include_stats": ["string (specific stat with attribution to weave in)", "..."],
+  "must_include_examples": ["string (concrete worked example or scenario)", "..."],
+  "tone_notes": "string (1-2 sentences on register, given the angle)"
+}}
+
+Article records:
+{articles_json}
+"""
+
+
+def _outline_blog_post(
+    article_summaries: List[dict],
+    client: anthropic.Anthropic,
+    model: str,
+    *,
+    editor_angle: Optional[str],
+    today_human: str,
+) -> Optional[dict]:
+    """Pass 1: produce a structured outline. Returns None on parse failure."""
+    angle_note = ""
+    if editor_angle and editor_angle.strip():
+        angle_note = (
+            f"★ EDITOR'S ANGLE (the outline must serve this lens): "
+            f"{editor_angle.strip()}\n"
+        )
+    prompt = _OUTLINE_TEMPLATE.format(
+        angle_note=angle_note,
+        today_human=today_human,
+        articles_json=json.dumps(article_summaries, ensure_ascii=False, indent=2),
+    )
+    try:
+        resp = client.messages.create(
+            model=model,
+            max_tokens=2000,
+            system=[
+                {"type": "text",
+                 "text": voice_block(include_past_replies=True, max_replies=6),
+                 "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": _JOURNALIST_PERSONA},
+            ],
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = resp.content[0].text
+        outline = parse_json_response(text)
+    except (anthropic.APIError, json.JSONDecodeError, IndexError, AttributeError) as exc:
+        log.warning("Blog outline pass failed (will fall back to one-shot): %s", exc)
+        return None
+    # Light validation
+    if not isinstance(outline, dict) or "sections" not in outline:
+        log.warning("Outline missing 'sections' key — falling back to one-shot.")
+        return None
+    return outline
+
+
+def _outline_to_prompt_block(outline: dict) -> str:
+    """Render the outline as a structured prompt block to drop into the draft pass."""
+    parts = ["\n--- APPROVED OUTLINE (write the draft to this plan) ---"]
+    if outline.get("working_title"):
+        parts.append(f"Working title: {outline['working_title']}")
+    if outline.get("thesis"):
+        parts.append(f"Thesis: {outline['thesis']}")
+    if outline.get("audience_note"):
+        parts.append(f"Audience: {outline['audience_note']}")
+    if outline.get("tone_notes"):
+        parts.append(f"Tone: {outline['tone_notes']}")
+    parts.append("\nSections to write (in order):")
+    for i, s in enumerate(outline.get("sections", []) or [], 1):
+        parts.append(f"\n{i}. {s.get('heading','')}")
+        if s.get("claim"):
+            parts.append(f"   Claim: {s['claim']}")
+        for kp in s.get("key_points", []) or []:
+            parts.append(f"   - {kp}")
+        srcs = s.get("sources_to_use") or []
+        if srcs:
+            parts.append(f"   Use: {', '.join(srcs)}")
+    if outline.get("must_include_stats"):
+        parts.append("\nStats to weave in (cite source inline like '(HMRC, 2026)'):")
+        for st in outline["must_include_stats"]:
+            parts.append(f"  - {st}")
+    if outline.get("must_include_examples"):
+        parts.append("\nWorked examples / scenarios to include:")
+        for ex in outline["must_include_examples"]:
+            parts.append(f"  - {ex}")
+    parts.append("\nWrite the draft now, following the outline above. Each section "
+                 "should expand the claim with depth — not just restate the key points.")
+    return "\n".join(parts)
+
+
 def generate_blog_post(
     article_summaries: List[dict],
     client: anthropic.Anthropic,
     model: str,
     *,
     existing_posts: Optional[List[dict]] = None,
+    editor_angle: Optional[str] = None,
+    progress_cb=None,
 ) -> Optional[dict]:
     """Generate a blog post.
 
@@ -164,6 +292,9 @@ def generate_blog_post(
                            When provided, the prompt instructs the LLM to weave
                            3–5 inline links into the draft using markdown link
                            syntax. Empty / None disables the suggestion.
+        editor_angle:      optional 1–2 sentence brief telling the LLM how to
+                           frame the piece. Becomes a priority instruction at
+                           the top of the user prompt.
     """
     if not article_summaries:
         return None
@@ -173,23 +304,48 @@ def generate_blog_post(
     div = _diversity_warning_blog(article_summaries) or ""
     diversity_note = f"⚠ {div}\n" if div else ""
 
+    angle_note = ""
+    if editor_angle and editor_angle.strip():
+        angle_note = (
+            "\n★ EDITOR'S ANGLE (priority framing — drive the title, intro, and "
+            f"section selection from this lens): {editor_angle.strip()}\n"
+        )
+
     related_posts_block = ""
     if existing_posts:
         # Local import keeps the optional dep out of cold start.
         from .internal_links import format_for_prompt
         related_posts_block = format_for_prompt(existing_posts)
 
+    # --- PASS 1: outline ----------------------------------------------------
+    if progress_cb: progress_cb("Outlining (pass 1 of 2)")
+    outline = _outline_blog_post(
+        article_summaries, client, model,
+        editor_angle=editor_angle, today_human=today_human,
+    )
+    outline_block = _outline_to_prompt_block(outline) if outline else ""
+
+    # --- PASS 2: draft (filled-in to the outline if it succeeded) -----------
+    if progress_cb: progress_cb("Drafting (pass 2 of 2)")
     prompt = USER_TEMPLATE.format(
         articles_json=json.dumps(article_summaries, ensure_ascii=False, indent=2),
         today_human=today_human,
         diversity_note=diversity_note,
+        angle_note=angle_note + outline_block,
         related_posts_block=related_posts_block,
     )
     try:
+        # Use cache_control on the (large, static) brand-voice block so
+        # repeat generations within ~5 min hit the Anthropic prompt cache
+        # at 90% off.
         resp = client.messages.create(
             model=model,
             max_tokens=8000,
-            system=SYSTEM_PROMPT,
+            system=[
+                {"type": "text", "text": voice_block(include_past_replies=True, max_replies=6),
+                 "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": _JOURNALIST_PERSONA},
+            ],
             messages=[{"role": "user", "content": prompt}],
         )
         text = resp.content[0].text
@@ -214,6 +370,9 @@ def generate_blog_post(
     data["published_iso"] = today.date().isoformat()
     data["published_human"] = today_human
     data["_diversity_warning"] = _diversity_warning_blog(article_summaries)
+    if outline:
+        # Stash the outline so the audit JSON can show how the post was planned.
+        data["_outline"] = outline
     return data
 
 
