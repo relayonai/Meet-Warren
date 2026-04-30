@@ -1555,7 +1555,14 @@ def _quality_revision_card(rev: dict | None) -> html.Div:
 
 def _verification_card(verification: dict | None) -> html.Div:
     """Render the source-URL verification result.
-    Hidden when nothing was checked (e.g. no sources_cited)."""
+
+    Distinguishes three states per URL:
+      ok      — 2xx/3xx response, verified live
+      blocked — 401/403/429 from a paywalled/bot-protected site (likely valid)
+      broken  — 404, 5xx, timeout, unreachable etc. (probably broken)
+
+    Border colour reflects only `broken`. `blocked` is informational.
+    """
     if not verification:
         return html.Div()
     summary = verification.get("summary", {}) or {}
@@ -1563,58 +1570,96 @@ def _verification_card(verification: dict | None) -> html.Div:
     if summary.get("total", 0) == 0:
         return html.Div()  # nothing was checked, no card
 
-    bad = summary.get("bad", 0)
-    total = summary.get("total", 0)
-    color = "success" if bad == 0 else ("warning" if bad / max(total, 1) <= 0.3 else "danger")
-    icon  = "✅" if bad == 0 else ("⚠️" if color == "warning" else "❌")
+    total   = summary.get("total", 0)
+    ok      = summary.get("ok", 0)
+    blocked = summary.get("blocked", 0)
+    broken  = summary.get("broken", 0)
 
-    bad_records = [(u, r) for u, r in records.items() if r.get("status") != "ok"]
+    if broken == 0:
+        color, icon = "success", "✅"
+    elif broken / max(total, 1) <= 0.3:
+        color, icon = "warning", "⚠️"
+    else:
+        color, icon = "danger", "❌"
+
     sev_color = {
+        # Genuine failures
         "404": "danger", "4xx": "danger", "5xx": "danger",
         "timeout": "warning", "ssl": "warning", "unreachable": "warning",
         "invalid": "warning", "error": "warning",
+        # Bot-blocked / paywalled — informational
+        "blocked": "secondary",
     }
-    bad_items = [
-        html.Li([
-            dbc.Badge((r.get("status") or "?").upper(),
-                      color=sev_color.get(r.get("status"), "secondary"),
+
+    def _row(u, r):
+        status = r.get("status") or "?"
+        is_blocked = status == "blocked"
+        return html.Li([
+            dbc.Badge(status.upper(),
+                      color=sev_color.get(status, "secondary"),
                       className="me-2", style={"fontSize": "0.65rem"}),
             html.A(u, href=u, target="_blank",
-                   style={"fontSize": "12px",
-                          "wordBreak": "break-all",
+                   style={"fontSize": "12px", "wordBreak": "break-all",
                           "color": "var(--warren-info)"}),
             html.Br(),
-            html.Small(f"HTTP {r.get('http_code')} · {r.get('error') or ''}",
-                       className="text-muted"),
+            html.Small(
+                (r.get("note") if is_blocked
+                 else f"HTTP {r.get('http_code')} · {r.get('error') or ''}"),
+                className="text-muted",
+            ),
         ], style={"marginBottom": "8px", "fontSize": "13px"})
-        for u, r in bad_records[:10]
-    ]
+
+    broken_records  = [(u, r) for u, r in records.items()
+                        if r.get("status") in
+                        {"404", "4xx", "5xx", "timeout", "ssl",
+                         "unreachable", "invalid", "error"}]
+    blocked_records = [(u, r) for u, r in records.items()
+                        if r.get("status") == "blocked"]
+
+    accordion_items = []
+    if broken_records:
+        accordion_items.append(dbc.AccordionItem([
+            html.Ul([_row(u, r) for u, r in broken_records[:15]]),
+            html.Small(
+                ("Action: open these URLs and either fix the citation "
+                 "(replace with a working source) or remove it before publishing."),
+                className="text-muted"),
+        ], title=f"⚠ {len(broken_records)} broken URL(s) — needs your attention"))
+    if blocked_records:
+        accordion_items.append(dbc.AccordionItem([
+            html.Ul([_row(u, r) for u, r in blocked_records[:15]]),
+            html.Small(
+                ("These sites refused our automated check (paywall or bot "
+                 "detection). The URL is almost certainly valid — open one "
+                 "in your browser to spot-check if needed."),
+                className="text-muted"),
+        ], title=f"ℹ {len(blocked_records)} URL(s) blocked by paywall / bot detection"))
+
+    if broken == 0 and blocked == 0:
+        right_msg = html.Small("All cited URLs respond.",
+                                className="text-success float-end")
+    elif broken == 0:
+        right_msg = html.Small(f"{blocked} blocked (paywall/bot detection)",
+                                className="text-muted float-end")
+    else:
+        right_msg = html.Small(
+            f"{broken} broken" + (f" · {blocked} blocked" if blocked else ""),
+            className="text-danger float-end")
 
     return dbc.Card(dbc.CardBody([
         dbc.Row([
             dbc.Col([
                 html.Span(icon, style={"fontSize": "1.4rem"}),
                 html.Span("  Source verification: ", className="ms-2"),
-                dbc.Badge(f"{summary['ok']} / {total} OK",
+                dbc.Badge(f"{ok} / {total} verified",
                           color=color, className="ms-1",
                           style={"fontSize": "0.85rem"}),
             ], md=8),
-            dbc.Col([
-                (html.Small(f"{bad} unreachable",
-                            className="text-danger float-end")
-                 if bad else html.Small("All cited URLs respond.",
-                                         className="text-success float-end")),
-            ], md=4),
+            dbc.Col([right_msg], md=4),
         ], className="mb-2"),
 
-        (dbc.Accordion([
-            dbc.AccordionItem([
-                html.Ul(bad_items),
-                html.Small(("Action: open the failing URLs above and either fix "
-                            "them in the result or remove the citation before publishing."),
-                           className="text-muted"),
-            ], title=f"View {len(bad_records)} failing URL(s)"),
-        ], start_collapsed=True, flush=True) if bad_records else html.Div()),
+        (dbc.Accordion(accordion_items, start_collapsed=(broken == 0), flush=True)
+         if accordion_items else html.Div()),
     ]), className="shadow-sm mb-3",
         style={"borderLeft": f"4px solid var(--bs-{color})"})
 
