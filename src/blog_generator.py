@@ -104,20 +104,6 @@ Return a JSON object that EXACTLY matches this schema (do not add or omit keys):
     {{"title": "string", "url": "string", "source": "string"}}
   ],
   "seo_tags": ["string", "..."],
-  "visual_elements": []
-  // 0–3 data visuals to place inline with sections. Leave [] when article data
-  // doesn't support a genuine visual. NEVER fabricate numbers — only cite figures
-  // explicitly present in the input records.
-  //
-  // Table shape (for rate/fee/allowance comparisons):
-  // {{"after_section":0, "type":"table", "title":"string", "headers":["Col A","Col B"], "rows":[["v","v"]]}}
-  //
-  // Chart shape (for time-series or magnitude comparisons):
-  // {{"after_section":1, "type":"chart_bar|chart_line|chart_pie",
-  //   "title":"string", "labels":["Jan 25"], "values":[5.25], "unit":"% AER"}}
-  //
-  // after_section: 0-based section index to insert after (-1 = after intro)
-  ,
   "hero_image_prompt": "string (1-2 sentence brief for a UK personal finance
     editorial illustration — describe scene, mood, colours. No text overlays.
     Example: 'A split-screen showing a rising interest rate graph on the left
@@ -274,11 +260,12 @@ def _outline_blog_post(
     *,
     editor_angle: Optional[str],
     today_human: str,
+    seo_brief: Optional[dict] = None,
 ) -> Optional[dict]:
     """Pass 1: produce a structured outline. Returns None on parse failure."""
-    angle_note = ""
+    angle_note = _seo_brief_block(seo_brief)
     if editor_angle and editor_angle.strip():
-        angle_note = (
+        angle_note += (
             f"★ EDITOR'S ANGLE (the outline must serve this lens): "
             f"{editor_angle.strip()}\n"
         )
@@ -345,6 +332,31 @@ def _outline_to_prompt_block(outline: dict) -> str:
     return "\n".join(parts)
 
 
+def _seo_brief_block(brief: Optional[dict]) -> str:
+    if not brief:
+        return ""
+    kw       = brief.get("primary_keyword", "")
+    h1       = brief.get("target_h1", "")
+    semantic = ", ".join(brief.get("semantic_keywords") or [])
+    meta     = brief.get("meta_description_brief", "")
+    faqs     = "\n".join(f"  - {q}" for q in (brief.get("faq_seeds") or []))
+    aeo      = brief.get("aeo_signals") or {}
+    ans_first = "\n".join(f"  - {s}" for s in (aeo.get("answer_first_targets") or []))
+    speakable = "\n".join(f"  - {s}" for s in (aeo.get("speakable_candidates") or []))
+    stats     = "\n".join(f"  - {s}" for s in (aeo.get("citation_stats") or []))
+    return (
+        f"\n★ SEO/AEO BRIEF (priority directive — every section serves this):\n"
+        f"Primary keyword: {kw}\n"
+        f"Target H1: {h1}\n"
+        f"Semantic keywords: {semantic}\n"
+        f"Meta description brief: {meta}\n"
+        f"FAQ seeds (use these verbatim as faqs):\n{faqs}\n"
+        f"Answer-first sections (open each with a 1-sentence direct answer):\n{ans_first}\n"
+        f"Speakable candidates (include near-verbatim):\n{speakable}\n"
+        f"Stats to cite inline:\n{stats}\n"
+    )
+
+
 def generate_blog_post(
     article_summaries: List[dict],
     client: anthropic.Anthropic,
@@ -352,6 +364,7 @@ def generate_blog_post(
     *,
     existing_posts: Optional[List[dict]] = None,
     editor_angle: Optional[str] = None,
+    seo_brief: Optional[dict] = None,
     progress_cb=None,
 ) -> Optional[dict]:
     """Generate a blog post.
@@ -376,9 +389,9 @@ def generate_blog_post(
     div = _diversity_warning_blog(article_summaries) or ""
     diversity_note = f"⚠ {div}\n" if div else ""
 
-    angle_note = ""
+    angle_note = _seo_brief_block(seo_brief)
     if editor_angle and editor_angle.strip():
-        angle_note = (
+        angle_note += (
             "\n★ EDITOR'S ANGLE (priority framing — drive the title, intro, and "
             f"section selection from this lens): {editor_angle.strip()}\n"
         )
@@ -394,6 +407,7 @@ def generate_blog_post(
     outline = _outline_blog_post(
         article_summaries, client, model,
         editor_angle=editor_angle, today_human=today_human,
+        seo_brief=seo_brief,
     )
     outline_block = _outline_to_prompt_block(outline) if outline else ""
 
@@ -447,6 +461,8 @@ def generate_blog_post(
     if outline:
         # Stash the outline so the audit JSON can show how the post was planned.
         data["_outline"] = outline
+    if seo_brief:
+        data["_seo_brief"] = seo_brief
     return data
 
 
@@ -707,9 +723,17 @@ def _seo_head(post: dict) -> str:
   <meta name="twitter:title" content="{escape(title)}">
   <meta name="twitter:description" content="{escape(description)}">"""
 
+    schema_flags = (post.get("_seo_brief") or {}).get("schema_flags") or []
+    ld_list = build_jsonld(post)
+    if "Speakable" in schema_flags:
+        ld_list.append({
+            "@context": "https://schema.org",
+            "@type": "SpeakableSpecification",
+            "cssSelector": [".tldr", "h1", "h2"],
+        })
     ld_blocks = "".join(
         f'\n  <script type="application/ld+json">{json.dumps(d, ensure_ascii=False)}</script>'
-        for d in build_jsonld(post)
+        for d in ld_list
     )
 
     return f"""
