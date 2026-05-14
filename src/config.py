@@ -55,6 +55,7 @@ class Config:
     gmail_to: str
     notion_token: str
     notion_database_id: str
+    warren_og_image: str
 
 
 def load_config() -> Config:
@@ -91,6 +92,7 @@ def load_config() -> Config:
         gmail_to=os.getenv("GMAIL_TO", "").strip(),
         notion_token=os.getenv("NOTION_TOKEN", "").strip(),
         notion_database_id=os.getenv("NOTION_DATABASE_ID", "").strip(),
+        warren_og_image=os.getenv("WARREN_OG_IMAGE", "").strip(),
     )
 
 

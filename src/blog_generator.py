@@ -12,6 +12,10 @@ import anthropic
 
 from ._json import parse_json_response
 from .brand_voice import voice_block
+from .design_elements import (
+    is_markdown_table, markdown_table_chunk_to_html,
+    render_table_html, render_chart_js, has_charts, CHARTJS_CDN,
+)
 
 log = logging.getLogger(__name__)
 
@@ -98,7 +102,26 @@ Return a JSON object that EXACTLY matches this schema (do not add or omit keys):
   "sources_cited": [
     {{"title": "string", "url": "string", "source": "string"}}
   ],
-  "seo_tags": ["string", "..."]
+  "seo_tags": ["string", "..."],
+  "visual_elements": []
+  // 0–3 data visuals to place inline with sections. Leave [] when article data
+  // doesn't support a genuine visual. NEVER fabricate numbers — only cite figures
+  // explicitly present in the input records.
+  //
+  // Table shape (for rate/fee/allowance comparisons):
+  // {{"after_section":0, "type":"table", "title":"string", "headers":["Col A","Col B"], "rows":[["v","v"]]}}
+  //
+  // Chart shape (for time-series or magnitude comparisons):
+  // {{"after_section":1, "type":"chart_bar|chart_line|chart_pie",
+  //   "title":"string", "labels":["Jan 25"], "values":[5.25], "unit":"% AER"}}
+  //
+  // after_section: 0-based section index to insert after (-1 = after intro)
+  ,
+  "hero_image_prompt": "string (1-2 sentence brief for a UK personal finance
+    editorial illustration — describe scene, mood, colours. No text overlays.
+    Example: 'A split-screen showing a rising interest rate graph on the left
+    and a worried homeowner reviewing mortgage paperwork on the right, muted
+    blues and greys, editorial photography style.')"
 }}
 
 Requirements:
@@ -112,17 +135,55 @@ Requirements:
 - Do NOT copy sentences verbatim from the inputs — synthesise and analyse.
 
 — QUALITY RUBRIC (drives the post-publish 100-pt analyser score) —
-Adapted from AgriciDaniel/claude-blog references (eeat-signals, quality-scoring, geo-optimization).
-Hit these targets so the analyser scores the post 80+:
+Hit these targets so the analyser scores the post 85+:
 
 CONTENT (30 pts)
-- Total length 1,500–2,500 words. Sections ~120–180 words between H2s.
-- Sentence length: average 15–20 words; ≤25% over 20 words; none over 40.
-- Flesch reading ease: aim 60–70 (acceptable 55–75).
+
+PARAGRAPH LENGTH — MANDATORY:
+Each section MUST open with a standalone "anchor paragraph" of 120–180 words.
+Count your words. If the anchor paragraph is under 100 or over 200 words, rewrite it.
+
+GOOD (131 words): "The Bank of England's decision to hold rates at 4.75% in March 2026
+surprised most economists, who had forecast a cut following February's softer inflation
+print. For mortgage holders on tracker rates, this means another month of elevated
+payments — the average two-year tracker is costing roughly £180 more per month than it
+did in 2021, according to UK Finance (2026). But the picture is more nuanced than the
+headline suggests. Fixed-rate borrowers who locked in during 2023 and 2024 are
+increasingly rolling off onto products that are cheaper than their expiring deals,
+provided they remortgage promptly. The critical question for the next six months is
+whether the MPC can thread the needle between taming residual services inflation and
+avoiding a housing-market slowdown."
+BAD: Three-sentence paragraph followed by a bullet list. Too short — AI engines cannot cite it.
+
+SENTENCE LENGTH — HARD LIMITS:
+- Maximum single sentence: 30 words. Split anything longer into two sentences.
+- Average target: 15–20 words per sentence.
+- Never use more than two subordinate clauses in one sentence.
+
+GOOD (18 words): "Mortgage rates have fallen steadily this year, but the gap between
+best buys and standard variable rates remains unusually wide."
+BAD (47 words): "While the Bank of England's decision to maintain its base rate at
+4.75% in March was widely anticipated by markets following the stronger-than-expected
+services inflation data released in February, it nonetheless disappointed homeowners
+who had been hoping for relief on their monthly payments." → SPLIT THIS.
+
+TRANSITION WORDS — TARGET 20–30% of sentences:
+Start at least 1 in 4 sentences with a transition word or phrase.
+Use: However, Therefore, As a result, Meanwhile, By contrast, Notably, That said,
+In practice, For example, Crucially, Beyond this, On balance, In turn, Importantly.
+Do NOT use: Furthermore, Moreover, Leverage, Delve, Navigate the landscape.
+
+GOOD flow: "Inflation fell to 2.6% in March (ONS, 2026). However, wage growth remained
+at 5.6% (ONS, 2026), keeping the MPC cautious. As a result, further rate cuts look
+unlikely before August."
+BAD flow: "Inflation fell to 2.6% in March. Wage growth remained at 5.6%. Rate cuts
+look unlikely before August." — no transitions, reads as a disconnected list of facts.
+
+- Flesch reading ease: aim 60–70 (acceptable 55–75). Short sentences are the lever.
 - Passive voice ≤10%. Avoid AI-trigger words ("delve", "leverage", "navigate the
   landscape", "in today's fast-paced world", "it's important to note").
-- Originality markers: include at least one of [first-person observation,
-  ORIGINAL DATA, "in our analysis", "we tested", "we found"].
+- Originality markers: include at least two of [first-person observation, ORIGINAL DATA,
+  "in our analysis", "we tested", "we found", "our reading of"].
 - Engagement: include at least 2 rhetorical questions and 2 concrete worked
   examples or scenarios in the body.
 
@@ -130,13 +191,23 @@ SEO (25 pts)
 - Title 40–60 chars, front-loaded keyword, no clickbait.
 - meta_description 150–160 chars, includes one statistic, ends with a value prop.
 - Each H2 contains the primary keyword OR a closely related phrase.
-- Reference 3–8 authoritative outbound sources via inline citations like
-  "(HMRC, 2026)" — every statistic must be attributed inline AND appear in
-  sources_cited. Never fabricate numbers.
+
+INLINE CITATIONS — HARD REQUIREMENT:
+After EVERY number, percentage, £ figure, or institutional claim, add "(Source, year)"
+immediately — no exceptions. Do not group citations at the end of a paragraph.
+
+GOOD: "Inflation fell to 2.6% in March 2026 (ONS, 2026), its lowest reading since the
+post-pandemic peak, but wage growth remained at 5.6% (ONS, 2026), keeping the MPC
+cautious."
+BAD: "Inflation fell to 2.6% and wages grew 5.6%." — no citations, fails E-E-A-T.
+
+Every source in sources_cited MUST appear at least once as an inline citation.
+Minimum 5 inline citations total across the post.
 
 E-E-A-T (15 pts)
-- Use first-person plural ("we") sparingly, only where it reflects analytical
-  experience (e.g. "in our reading of the FCA's 2026 guidance...").
+- Use first-person plural ("we") where it reflects analytical experience
+  (e.g. "in our reading of the FCA's 2026 guidance...", "our analysis finds...").
+  Include at least 2 such first-person experience phrases.
 - Cite tier-1 UK sources where possible (gov.uk, BoE, FCA, ONS, FT, Reuters).
 - Include at least one quoted phrase from a named institution or report.
 
@@ -364,6 +435,8 @@ def generate_blog_post(
     data.setdefault("faqs", [])
     data.setdefault("sources_cited", [])
     data.setdefault("meta_description", (data.get("subtitle") or "")[:160])
+    data.setdefault("visual_elements", [])
+    data.setdefault("hero_image_prompt", "")
 
     # --- Server-side post-processing -----------------------------------------
     data["reading_time_minutes"] = _compute_reading_time(data)
@@ -398,10 +471,16 @@ FONT_DISPLAY = (
 
 
 def _paras(text: str) -> str:
-    return "".join(
-        f'<p style="margin:0 0 16px 0;">{escape(p.strip())}</p>'
-        for p in (text or "").split("\n\n") if p.strip()
-    )
+    parts = []
+    for chunk in (text or "").split("\n\n"):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if is_markdown_table(chunk):
+            parts.append(markdown_table_chunk_to_html(chunk))
+        else:
+            parts.append(f'<p style="margin:0 0 16px 0;">{escape(chunk)}</p>')
+    return "".join(parts)
 
 
 def _slug(text: str) -> str:
@@ -531,7 +610,7 @@ def _tldr_html(takeaways: list) -> str:
 def build_jsonld(post: dict) -> list[dict]:
     """Return JSON-LD schema dicts for a post.
 
-    Always includes a NewsArticle. Includes FAQPage when faqs are present.
+    Always includes a BlogPosting. Includes FAQPage when faqs are present.
     Reused by blog_to_html (HTML <head>) and the markdown exporter so the
     quality analyser credits schema regardless of which artifact it scores.
     """
@@ -543,12 +622,23 @@ def build_jsonld(post: dict) -> list[dict]:
 
     article_ld = {
         "@context": "https://schema.org",
-        "@type": "NewsArticle",
+        "@type": "BlogPosting",
         "headline": title,
         "description": description,
         "datePublished": published,
         "dateModified": published,
-        "author": [{"@type": "Organization", "name": "Warren Editorial Desk"}],
+        "author": [
+            {
+                "@type": "Person",
+                "name": "Warren Editorial Team",
+                "url": "https://meetwarren.co.uk/about",
+            },
+            {
+                "@type": "Organization",
+                "name": "Warren",
+                "url": "https://meetwarren.co.uk",
+            },
+        ],
         "publisher": {
             "@type": "Organization",
             "name": "Warren",
@@ -561,7 +651,18 @@ def build_jsonld(post: dict) -> list[dict]:
             "cssSelector": [".tldr", "h1"],
         },
     }
-    out = [article_ld]
+    person_ld = {
+        "@context": "https://schema.org",
+        "@type": "Person",
+        "name": "Warren Editorial Team",
+        "url": "https://meetwarren.co.uk/about",
+        "worksFor": {
+            "@type": "Organization",
+            "name": "Warren",
+            "url": "https://meetwarren.co.uk",
+        },
+    }
+    out = [article_ld, person_ld]
     if post.get("faqs"):
         out.append({
             "@context": "https://schema.org",
@@ -623,9 +724,47 @@ def blog_to_html(post: dict) -> str:
     published_iso   = post.get("published_iso") or datetime.now(timezone.utc).date().isoformat()
     today           = post.get("published_human") or datetime.now(timezone.utc).strftime("%d %B %Y").lstrip("0")
 
+    # Build visual elements lookup: after_section -> list of VE dicts
+    visual_elements = post.get("visual_elements") or []
+    _ve_by_section: dict[int, list] = {}
+    _ve_intro: list = []
+    _chart_counter = [0]  # mutable counter for unique chart IDs
+
+    for ve in visual_elements:
+        ai = ve.get("after_section")
+        if ai is None:
+            continue
+        try:
+            ai = int(ai)
+        except (TypeError, ValueError):
+            continue
+        if ai == -1:
+            _ve_intro.append(ve)
+        else:
+            _ve_by_section.setdefault(ai, []).append(ve)
+
+    def _render_ves(ves: list) -> str:
+        out = ""
+        for ve in ves:
+            vtype = ve.get("type", "")
+            if vtype == "table":
+                out += render_table_html(ve)
+            elif vtype.startswith("chart_"):
+                cid = f"wc-chart-{_chart_counter[0]}"
+                _chart_counter[0] += 1
+                out += render_chart_js(ve, cid)
+        return out
+
     intro_paras      = _paras(post.get("intro", "") or "")
+    intro_ve_html    = _render_ves(_ve_intro)
     conclusion_paras = _paras(post.get("conclusion", "") or "")
-    sections_html    = "".join(_section_html(s, i) for i, s in enumerate(post.get("sections", [])))
+
+    # Build sections with VEs inserted after each
+    sections_html = ""
+    for i, s in enumerate(post.get("sections", [])):
+        sections_html += _section_html(s, i)
+        sections_html += _render_ves(_ve_by_section.get(i, []))
+
     toc              = _toc_html(post.get("sections", []))
     tldr             = _tldr_html(post.get("key_takeaways", []))
     takeaways        = _takeaways_html(post.get("key_takeaways", []))
@@ -633,6 +772,7 @@ def blog_to_html(post: dict) -> str:
     sources          = _sources_html(post.get("sources_cited", []))
     tags             = _tags_html(post.get("seo_tags", []))
     seo_head         = _seo_head(post)
+    chartjs_tag      = CHARTJS_CDN if has_charts(visual_elements) else ""
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -641,6 +781,7 @@ def blog_to_html(post: dict) -> str:
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>{title}</title>{seo_head}
+  {chartjs_tag}
   <style>
     @media (prefers-color-scheme: dark) {{
       body {{ background:#0f1419 !important; color:#e6e9ef !important; }}
@@ -670,7 +811,7 @@ def blog_to_html(post: dict) -> str:
   </header>
 
   <main role="main" style="max-width:780px;margin:0 auto;padding:48px 24px 24px 24px;background:#ffffff;">
-    <article itemscope itemtype="https://schema.org/NewsArticle">
+    <article itemscope itemtype="https://schema.org/BlogPosting">
       <meta itemprop="datePublished" content="{escape(published_iso)}">
 
       <div style="font-size:11px;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:{ACCENT};margin-bottom:14px;">Analysis · UK Personal Finance</div>
@@ -686,6 +827,7 @@ def blog_to_html(post: dict) -> str:
 
       <div itemprop="articleBody" style="font-size:18px;line-height:1.8;color:{INK};margin-top:24px;">
         {intro_paras}
+        {intro_ve_html}
         {takeaways}
         <nav role="doc-toc" aria-label="Table of contents">{toc}</nav>
         {sections_html}
@@ -694,6 +836,12 @@ def blog_to_html(post: dict) -> str:
           <div style="font-size:11px;font-weight:700;letter-spacing:0.14em;text-transform:uppercase;color:{ACCENT};margin-bottom:12px;">The Bottom Line</div>
           <div style="font-size:17px;line-height:1.7;">{conclusion_paras}</div>
         </section>
+
+        <p class="warren-trust-footer" style="font-size:13px;color:#6b7280;margin:24px 0;font-style:italic;">
+          The <a href="https://meetwarren.co.uk/about" style="color:#6b7280;">Warren Editorial Team</a>
+          produces independent UK personal finance analysis.
+          <a href="mailto:info@meetwarren.co.uk" style="color:#6b7280;">Contact us</a>.
+        </p>
 
         {faqs}
         {sources}

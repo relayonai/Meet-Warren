@@ -39,6 +39,76 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+def _is_md_table_para(text: str) -> bool:
+    """True if a paragraph split from section content looks like a markdown table."""
+    from .design_elements import is_markdown_table
+    return is_markdown_table(text)
+
+
+def _docx_add_md_table(doc, text: str):
+    """Parse a markdown table chunk and add a python-docx Table to doc."""
+    from docx.shared import RGBColor, Pt
+    lines = [l.strip() for l in text.strip().split("\n") if l.strip()]
+    headers = [c.strip() for c in lines[0].strip("|").split("|")]
+    rows = [
+        [c.strip() for c in l.strip("|").split("|")]
+        for l in lines[2:]
+        if l.strip()
+    ]
+    n_cols = len(headers)
+    if not n_cols:
+        return
+    table = doc.add_table(rows=1 + len(rows), cols=n_cols)
+    table.style = "Table Grid"
+    hdr_cells = table.rows[0].cells
+    for i, h in enumerate(headers[:n_cols]):
+        hdr_cells[i].text = str(h)
+        for run in hdr_cells[i].paragraphs[0].runs:
+            run.bold = True
+            run.font.color.rgb = RGBColor(0x0B, 0x25, 0x45)
+    for ri, row in enumerate(rows):
+        row_cells = table.rows[ri + 1].cells
+        for ci, cell in enumerate(row[:n_cols]):
+            row_cells[ci].text = str(cell)
+    doc.add_paragraph()
+
+
+def _docx_add_ve_table(doc, ve: dict):
+    """Add a visual_elements table dict as a python-docx Table."""
+    from docx.shared import RGBColor, Pt
+    title   = ve.get("title", "")
+    headers = ve.get("headers") or []
+    rows    = ve.get("rows") or []
+    if not headers and not rows:
+        return
+    if title:
+        p = doc.add_paragraph()
+        run = p.add_run(title)
+        run.bold = True
+        run.font.size = Pt(10)
+        run.font.color.rgb = RGBColor(0x5A, 0x64, 0x78)
+    n_cols = len(headers) or (len(rows[0]) if rows else 0)
+    if not n_cols:
+        return
+    table = doc.add_table(rows=1 + len(rows), cols=n_cols)
+    table.style = "Table Grid"
+    hdr_cells = table.rows[0].cells
+    for i, h in enumerate(headers[:n_cols]):
+        hdr_cells[i].text = str(h)
+        for run in hdr_cells[i].paragraphs[0].runs:
+            run.bold = True
+            run.font.color.rgb = RGBColor(0x0B, 0x25, 0x45)
+    for ri, row in enumerate(rows):
+        row_cells = table.rows[ri + 1].cells
+        for ci, cell in enumerate(row[:n_cols]):
+            row_cells[ci].text = str(cell)
+    doc.add_paragraph()
+
+
+# ---------------------------------------------------------------------------
 # PDF
 # ---------------------------------------------------------------------------
 
@@ -199,14 +269,38 @@ def _docx_blog(result: dict) -> bytes:
         if para.strip():
             doc.add_paragraph(para.strip())
 
-    for s in result.get("sections", []) or []:
+    # Build visual_elements lookup for section insertion
+    _ve_by_section: dict = {}
+    for ve in (result.get("visual_elements") or []):
+        ai = ve.get("after_section")
+        if ai is None:
+            continue
+        try:
+            ai = int(ai)
+        except (TypeError, ValueError):
+            continue
+        if ai >= 0:
+            _ve_by_section.setdefault(ai, []).append(ve)
+
+    for si, s in enumerate(result.get("sections", []) or []):
         _docx_add_heading(doc, s.get("heading", ""), level=1)
         for para in (s.get("content") or "").split("\n\n"):
-            if para.strip():
-                doc.add_paragraph(para.strip())
+            para = para.strip()
+            if not para:
+                continue
+            if _is_md_table_para(para):
+                _docx_add_md_table(doc, para)
+            else:
+                doc.add_paragraph(para)
         if s.get("pull_quote"):
             q = doc.add_paragraph()
             q.add_run(f'"{s["pull_quote"]}"').italic = True
+        for ve in _ve_by_section.get(si, []):
+            if ve.get("type") == "table":
+                _docx_add_ve_table(doc, ve)
+            elif (ve.get("type") or "").startswith("chart_"):
+                p = doc.add_paragraph()
+                p.add_run(f"[Chart: {ve.get('title', '')}]").italic = True
 
     _docx_add_heading(doc, "The Bottom Line", level=1)
     for para in (result.get("conclusion") or "").split("\n\n"):
@@ -304,15 +398,42 @@ def _md_blog(result: dict) -> str:
     published   = result.get("published_iso") or ""
     tags        = result.get("seo_tags") or []
 
-    out.append("---")
-    out.append(f"title: {_yaml_str(title)}")
+    # slug — use the output basename if stamped in, otherwise slugify the title
+    import re as _re
+    slug = result.get("_output_basename") or ""
+    if not slug:
+        slug = _re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:60]
+
+    # primary keyword from first seo_tag
+    keyword = tags[0] if tags else ""
+
+    # og_image from env config
+    og_image = ""
+    try:
+        from src.config import load_config as _load_cfg
+        og_image = _load_cfg().warren_og_image
+    except Exception:
+        pass
+
+    out_fm: list[str] = []
+    out_fm.append(f"title: {_yaml_str(title)}")
     if description:
-        out.append(f"description: {_yaml_str(description)}")
-    out.append(f"author: {_yaml_str(author)}")
+        out_fm.append(f"description: {_yaml_str(description)}")
+    out_fm.append(f"author: {_yaml_str(author)}")
     if published:
-        out.append(f"date: {published}")
+        out_fm.append(f"date: {published}")
+    if slug:
+        out_fm.append(f"slug: {_yaml_str(slug)}")
+    if keyword:
+        out_fm.append(f"keyword: {_yaml_str(keyword)}")
+    if og_image:
+        out_fm.append(f"image: {_yaml_str(og_image)}")
+        out_fm.append(f"og_image: {_yaml_str(og_image)}")
     if tags:
-        out.append(f"tags: [{', '.join(_yaml_str(t) for t in tags)}]")
+        out_fm.append(f"tags: [{', '.join(_yaml_str(t) for t in tags)}]")
+
+    out.append("---")
+    out += out_fm
     out.append("---")
     out.append("")
 
@@ -334,12 +455,54 @@ def _md_blog(result: dict) -> str:
     if result.get("intro"):
         out += [result["intro"], ""]
 
-    for s in result.get("sections", []) or []:
+    _md_ve_by_section: dict = {}
+    for ve in (result.get("visual_elements") or []):
+        ai = ve.get("after_section")
+        if ai is None:
+            continue
+        try:
+            ai = int(ai)
+        except (TypeError, ValueError):
+            continue
+        if ai >= 0:
+            _md_ve_by_section.setdefault(ai, []).append(ve)
+
+    for si, s in enumerate(result.get("sections", []) or []):
         out += [f"## {s.get('heading','')}", "", (s.get("content") or ""), ""]
         if s.get("pull_quote"):
             out += [f"> {s['pull_quote']}", ""]
+        for ve in _md_ve_by_section.get(si, []):
+            vtype = ve.get("type", "")
+            title = ve.get("title", "")
+            if vtype == "table":
+                headers = ve.get("headers") or []
+                rows = ve.get("rows") or []
+                if headers:
+                    out.append("| " + " | ".join(str(h) for h in headers) + " |")
+                    out.append("| " + " | ".join("---" for _ in headers) + " |")
+                    for row in rows:
+                        out.append("| " + " | ".join(str(c) for c in row) + " |")
+                    out.append("")
+            elif vtype.startswith("chart_"):
+                labels = ve.get("labels") or []
+                values = ve.get("values") or []
+                unit   = ve.get("unit", "")
+                if title:
+                    out.append(f"**{title}**")
+                if labels and values:
+                    out.append("| Label | Value |")
+                    out.append("| --- | --- |")
+                    for l, v in zip(labels, values):
+                        out.append(f"| {l} | {v} {unit} |")
+                    out.append("")
 
-    out += ["## The Bottom Line", "", result.get("conclusion", ""), ""]
+    _TRUST_FOOTER_MD = (
+        "_The Warren Editorial Team produces independent UK personal finance analysis. "
+        "[About Warren](https://meetwarren.co.uk/about) · "
+        "[Contact](mailto:info@meetwarren.co.uk)_"
+    )
+
+    out += ["## The Bottom Line", "", result.get("conclusion", ""), "", _TRUST_FOOTER_MD, ""]
 
     if result.get("faqs"):
         out += ["## Frequently Asked Questions", ""]

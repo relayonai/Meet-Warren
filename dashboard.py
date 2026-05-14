@@ -26,6 +26,7 @@ from src.archive import (archive_stats, delete_entry as archive_delete_entry,
 from src.blog_generator import generate_blog_post, blog_to_html, blog_to_text
 from src.blog_quality import quick_score as blog_quick_score
 from src.compliance import ensure_compliant, load_rulebook
+from src.compliance.advisor import advise_document, parse_elements as compliance_parse_elements
 from src.compliance.pipeline import init_compliance_tables
 from src.config import build_anthropic_client, load_config
 from src.database import get_connection, init_db, query_articles
@@ -34,6 +35,7 @@ from src.blog_quality_revision import revise_for_quality
 from src.formatter import to_html, to_text
 from src.generator import generate_newsletter
 from src.internal_links import load_published_corpus
+from src.brand_review import review_brand_voice
 from src.source_verifier import summarise as verify_summarise, verify_urls
 
 # ---------------------------------------------------------------------------
@@ -971,13 +973,25 @@ def update_generate_btn(selected, content_type):
 _jobs: dict[str, dict] = {}        # job_id → {stage, label, started_at, error, result_div}
 _jobs_lock = threading.Lock()
 
+# Compliance-advisor jobs (separate dict, same pattern)
+_cp_jobs: dict[str, dict] = {}
+_cp_jobs_lock = threading.Lock()
+
+_CP_STAGES = [
+    ("parse",      "Parsing document elements"),
+    ("hard_rules", "Checking banned phrases & terms"),
+    ("llm",        "Running LLM compliance advisor"),
+    ("done",       "Complete"),
+]
+
 # Stage labels shown in the progress card. Must match what the worker sets.
 _STAGES = [
     ("collect",      "Loading article context"),
     ("draft",        "Drafting with Claude"),
     ("verify",       "Verifying source URLs"),
-    ("quality_loop", "Quality-revision loop (blog only)"),
-    ("compliance",   "Compliance grading + revision"),
+    ("quality_loop",  "Quality-revision loop (blog only)"),
+    ("brand_review",  "Brand voice audit"),
+    ("compliance",    "Compliance grading + revision"),
     ("export",       "Rendering PDF, DOCX, Markdown, EML"),
     ("quality",      "Final 100-pt rubric score"),
     ("done",         "Done"),
@@ -1189,6 +1203,23 @@ def _run_generation_job(job_id: str, summaries: list, content_type: str,
                                                          "all_ok": True},
                              "checked": [], "error": str(e)}
 
+        # --- Readability + flow pass (blog only) ----------------------------
+        readability_result = None
+        if kind == "blog":
+            try:
+                from src.readability_pass import run_readability_pass
+                readability_result = run_readability_pass(
+                    result, client=client, model=cfg.anthropic_model,
+                    progress_cb=lambda s: _set_stage(job_id, "quality_loop", sub=s),
+                )
+                if readability_result.get("improved"):
+                    result = readability_result["final_post"]
+                    out_html = blog_to_html(result)
+                    out_text = blog_to_text(result)
+            except Exception as e:
+                print(f"Readability pass failed (non-fatal): {e}")
+                readability_result = {"improved": False, "error": str(e)}
+
         # --- Quality-revision loop (blog only) ------------------------------
         quality_revision = None
         if kind == "blog":
@@ -1196,7 +1227,6 @@ def _run_generation_job(job_id: str, summaries: list, content_type: str,
             try:
                 quality_revision = revise_for_quality(
                     result, client=client, model=cfg.anthropic_model, kind="blog",
-                    target_score=78, max_iterations=2,
                     progress_cb=lambda s: _set_stage(job_id, "quality_loop", sub=s),
                 )
                 if quality_revision.get("revised"):
@@ -1207,6 +1237,31 @@ def _run_generation_job(job_id: str, summaries: list, content_type: str,
             except Exception as e:
                 print(f"Quality-revision loop failed (non-fatal): {e}")
                 quality_revision = {"error": str(e), "revised": False, "audit": []}
+
+            # Attach readability pass result to quality_revision for audit display
+            if quality_revision and readability_result:
+                quality_revision["readability_pass"] = {
+                    "improved":           readability_result.get("improved", False),
+                    "before_flesch":      readability_result.get("before_flesch"),
+                    "after_flesch":       readability_result.get("after_flesch"),
+                    "before_transitions": readability_result.get("before_transitions"),
+                    "after_transitions":  readability_result.get("after_transitions"),
+                    "changes":            readability_result.get("changes", []),
+                }
+
+        # --- Brand voice audit -----------------------------------------------
+        brand_review = None
+        try:
+            _set_stage(job_id, "brand_review", sub="auditing voice + terminology")
+            kb = load_knowledge_base()
+            brand_review = review_brand_voice(
+                out_html, kb=kb, client=client, model=cfg.anthropic_model,
+                kind=kind,
+            )
+        except Exception as e:
+            print(f"Brand review failed (non-fatal): {e}")
+            brand_review = {"grade": "warn", "issues": [], "summary": f"Brand review failed: {e}",
+                            "elapsed_seconds": 0.0, "error": str(e)}
 
         _set_stage(job_id, "compliance")
         conn_c = get_connection(cfg.db_path)
@@ -1221,6 +1276,7 @@ def _run_generation_job(job_id: str, summaries: list, content_type: str,
         # `result` dict, so plaintext stays in sync — only HTML is mutated.
 
         _set_stage(job_id, "export", sub="7 formats in parallel")
+        result["_output_basename"] = base
         paths = _write_all_formats(base, kind=kind, result=result,
                                    html_str=out_html, text_str=out_text,
                                    subject=subject, summaries_in=summaries,
@@ -1265,6 +1321,12 @@ def _run_generation_job(job_id: str, summaries: list, content_type: str,
                     }
                 if verification is not None:
                     sidecar["verification_summary"] = verification.get("summary")
+                if brand_review is not None:
+                    sidecar["brand_review"] = {
+                        "grade":   brand_review.get("grade"),
+                        "issues":  brand_review.get("issues", []),
+                        "summary": brand_review.get("summary"),
+                    }
                 with open(json_path, "w") as f:
                     json.dump(sidecar, f, indent=2, ensure_ascii=False, default=str)
             except Exception as e:
@@ -1284,7 +1346,8 @@ def _run_generation_job(job_id: str, summaries: list, content_type: str,
             ]
             preview = _content_preview("✉️ Newsletter Generated", subject,
                                         paths, out_html, sections_list, compliance,
-                                        verification=verification)
+                                        verification=verification,
+                                        brand_review=brand_review)
         else:
             meta_list = []
             rt = result.get("reading_time_minutes")
@@ -1300,7 +1363,8 @@ def _run_generation_job(job_id: str, summaries: list, content_type: str,
             preview = _content_preview("📝 Blog Post Generated", subject,
                                         paths, out_html, meta_list, compliance,
                                         quality=quality, verification=verification,
-                                        quality_revision=quality_revision)
+                                        quality_revision=quality_revision,
+                                        brand_review=brand_review)
 
         with _jobs_lock:
             _jobs[job_id]["stage"]      = "done"
@@ -1391,6 +1455,80 @@ def poll_generation(_n, job_id):
     # Still running — refresh the progress card.
     return _progress_card(job_id), False, True
 
+
+
+def _brand_review_card(brand_review: dict | None) -> html.Div:
+    """Render a card summarising the brand voice audit result."""
+    if not brand_review:
+        return html.Div()
+
+    grade   = brand_review.get("grade", "pass")
+    issues  = brand_review.get("issues") or []
+    summary = brand_review.get("summary", "")
+
+    color = {"pass": "success", "warn": "warning", "fail": "danger"}.get(grade, "secondary")
+    icon  = {"pass": "✅", "warn": "⚠️", "fail": "❌"}.get(grade, "•")
+
+    criticals   = [i for i in issues if i.get("severity") == "critical"]
+    warnings    = [i for i in issues if i.get("severity") == "warning"]
+    suggestions = [i for i in issues if i.get("severity") == "suggestion"]
+
+    _SEV_COLOR = {"critical": "danger", "warning": "warning", "suggestion": "info"}
+
+    def _issue_item(issue: dict) -> html.Li:
+        sev  = issue.get("severity", "suggestion")
+        field = issue.get("field", "")
+        finding = issue.get("finding", "")
+        suggestion = issue.get("suggestion", "")
+        return html.Li([
+            dbc.Badge(sev.upper(), color=_SEV_COLOR.get(sev, "secondary"),
+                      className="me-2", style={"fontSize": "0.7rem"}),
+            dbc.Badge(field, color="light", text_color="dark",
+                      className="me-2", style={"fontSize": "0.7rem"}),
+            html.Strong(finding[:120]),
+            html.Br(),
+            html.Small(f"Fix: {suggestion}", className="text-muted"),
+        ], style={"marginBottom": "10px"})
+
+    issue_items = [_issue_item(i) for i in issues[:12]]
+
+    stats_text = []
+    if criticals:
+        stats_text.append(f"{len(criticals)} critical")
+    if warnings:
+        stats_text.append(f"{len(warnings)} warning(s)")
+    if suggestions:
+        stats_text.append(f"{len(suggestions)} suggestion(s)")
+    stats_str = ", ".join(stats_text) if stats_text else "No issues found"
+
+    body_children = [
+        dbc.Row([
+            dbc.Col([
+                html.Span(icon, style={"fontSize": "1.5rem"}),
+                html.Span(" Brand Voice: ", className="ms-2"),
+                dbc.Badge(grade.upper(), color=color, className="ms-1"),
+                html.Span(f"  {stats_str}",
+                          className="text-muted ms-2", style={"fontSize": "0.9rem"}),
+            ]),
+        ], className="mb-2"),
+        html.P(summary, className="text-muted mb-0", style={"fontSize": "0.9rem"}),
+    ]
+
+    if issue_items:
+        body_children.append(
+            dbc.Accordion([
+                dbc.AccordionItem(
+                    html.Ul(issue_items, style={"paddingLeft": "1.2rem", "marginBottom": 0}),
+                    title=f"View {len(issue_items)} brand voice issue(s)",
+                ),
+            ], start_collapsed=True, className="mt-3"),
+        )
+
+    return dbc.Card(
+        dbc.CardBody(body_children),
+        className="shadow-sm mb-3",
+        style={"borderLeft": f"4px solid var(--bs-{color})"},
+    )
 
 
 def _compliance_card(compliance: dict) -> dbc.Card:
@@ -1837,7 +1975,8 @@ def _content_preview(badge_title: str, content_title: str,
                      compliance: dict | None = None,
                      quality: dict | None = None,
                      verification: dict | None = None,
-                     quality_revision: dict | None = None) -> html.Div:
+                     quality_revision: dict | None = None,
+                     brand_review: dict | None = None) -> html.Div:
     primary = paths.get("html") or next(iter(paths.values()), "")
     return html.Div([
         dbc.Alert([
@@ -1852,6 +1991,7 @@ def _content_preview(badge_title: str, content_title: str,
         _download_bar(paths),
         _verification_card(verification) if verification else html.Div(),
         _quality_revision_card(quality_revision) if quality_revision else html.Div(),
+        _brand_review_card(brand_review) if brand_review else html.Div(),
         _compliance_card(compliance) if compliance else html.Div(),
         _quality_card(quality) if quality else html.Div(),
         dbc.Row([
@@ -2040,6 +2180,57 @@ def _compliance_page():
         ], title=f"Canonical Disclaimers ({len(rb.canonical_disclaimers)})"),
     ], start_collapsed=True, flush=False, className="mb-4")
 
+    doc_checker = dbc.Card(dbc.CardBody([
+        html.H5("Document Compliance Advisor", className="fw-bold text-primary mb-1"),
+        html.P([
+            "Upload any document and the advisor will review every line — titles, "
+            "paragraphs, bullet points and speech elements — against the rulebook. "
+            "Each violation is returned with the relevant rule, a plain-English "
+            "finding, and a concrete fix."
+        ], className="text-muted small mb-3"),
+        dbc.Row([
+            dbc.Col([
+                dcc.Upload(
+                    id="cp-doc-upload",
+                    children=html.Div([
+                        html.Span("📎 ", style={"fontSize": "1.6rem"}),
+                        html.Div([
+                            html.Span("Drag & drop a document or "),
+                            html.A("browse to upload", style={"cursor": "pointer",
+                                                               "textDecoration": "underline"}),
+                        ], className="mt-1"),
+                        html.Small(".docx · .txt · .md · .html",
+                                   className="text-muted d-block mt-1"),
+                    ], className="text-center py-4"),
+                    style={
+                        "border": "2px dashed #c0c8d4",
+                        "borderRadius": "8px",
+                        "cursor": "pointer",
+                        "background": "#f8f9fa",
+                        "transition": "border-color 0.15s",
+                    },
+                    multiple=False,
+                ),
+                html.Div(id="cp-doc-filename", className="text-muted small mt-2"),
+            ], md=8),
+            dbc.Col([
+                dbc.Button(
+                    [html.Span("🛡 ", style={"fontSize": "1.1rem"}), " Run Compliance Check"],
+                    id="cp-doc-check-btn",
+                    color="primary",
+                    disabled=True,
+                    size="lg",
+                    className="w-100 h-100",
+                    style={"minHeight": "80px"},
+                ),
+            ], md=4, className="d-flex align-items-center"),
+        ], className="g-3"),
+        html.Div(id="cp-doc-result", className="mt-4"),
+        dcc.Store(id="cp-doc-job-id"),
+        dcc.Store(id="cp-doc-result-store"),
+        dcc.Interval(id="cp-doc-poll", interval=800, disabled=True, n_intervals=0),
+    ]), className="shadow-sm mb-4")
+
     return html.Div([
         html.H3("Compliance", className="fw-bold mb-1"),
         html.P([
@@ -2047,19 +2238,532 @@ def _compliance_page():
             " · cached at ", html.Code("data/compliance_rules.json"),
         ], className="text-muted mb-4"),
         summary_cards,
+        doc_checker,
         dbc.Card(dbc.CardBody([
             html.H5("Marketing Compliance Rulebook", className="fw-bold text-primary mb-3"),
             rules_html,
         ]), className="shadow-sm mb-4"),
-        dbc.Card(dbc.CardBody([
-            html.H5("Recent Compliance Runs", className="fw-bold text-primary mb-3"),
-            log_table,
-        ]), className="shadow-sm mb-4"),
-        dbc.Card(dbc.CardBody([
-            html.H5("Flagged Articles", className="fw-bold text-primary mb-3"),
-            flagged_table,
-        ]), className="shadow-sm mb-4"),
+        dbc.Accordion([
+            dbc.AccordionItem(
+                log_table,
+                title=f"Recent Compliance Runs ({len(log_rows)})",
+            ),
+            dbc.AccordionItem(
+                flagged_table,
+                title=f"Flagged Articles ({len(flagged_articles)})",
+            ),
+        ], start_collapsed=True, flush=False, className="mb-4 shadow-sm"),
     ])
+
+
+# ===========================================================================
+# COMPLIANCE PAGE — document checker callbacks
+# ===========================================================================
+
+def _extract_doc_text(filename: str, content_b64: str) -> tuple[str, str | None]:
+    """Decode a dcc.Upload payload and return (plain_text, error_msg).
+
+    Supports .docx, .txt, .md, .html.  Returns ("", error) for unsupported types.
+    """
+    import base64, io, re as _re
+
+    # dcc.Upload sends "data:<mime>;base64,<data>"
+    if "," in content_b64:
+        content_b64 = content_b64.split(",", 1)[1]
+
+    raw = base64.b64decode(content_b64)
+    ext = os.path.splitext(filename.lower())[1]
+
+    if ext == ".docx":
+        try:
+            from docx import Document
+            doc = Document(io.BytesIO(raw))
+            return "\n".join(p.text for p in doc.paragraphs if p.text.strip()), None
+        except Exception as e:
+            return "", f"Could not read .docx: {e}"
+
+    if ext in (".txt", ".md"):
+        try:
+            return raw.decode("utf-8", errors="replace"), None
+        except Exception as e:
+            return "", f"Could not decode file: {e}"
+
+    if ext in (".html", ".htm"):
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(raw.decode("utf-8", errors="replace"), "html.parser")
+            return soup.get_text(separator=" "), None
+        except Exception as e:
+            return "", f"Could not parse HTML: {e}"
+
+    if ext == ".pdf":
+        return "", "PDF files are not supported — please upload a .docx, .txt, .md, or .html file."
+
+    return "", f"Unsupported file type '{ext}' — use .docx, .txt, .md, or .html."
+
+
+@app.callback(
+    Output("cp-doc-filename",  "children"),
+    Output("cp-doc-check-btn", "disabled"),
+    Input("cp-doc-upload",     "filename"),
+    Input("cp-doc-upload",     "contents"),
+    prevent_initial_call=True,
+)
+def _cp_on_upload(filename, contents):
+    if not filename or not contents:
+        return "", True
+    _, err = _extract_doc_text(filename, contents)
+    if err:
+        return dbc.Alert(err, color="warning", className="mb-0 py-2 small"), True
+    return html.Span(["📄 ", html.Strong(filename), " — ready"],
+                     className="text-success"), False
+
+
+# ---------------------------------------------------------------------------
+# Shared result-rendering helpers
+# ---------------------------------------------------------------------------
+
+_SEV_COLOR = {"critical": "danger", "warning": "warning", "suggestion": "info"}
+_SEV_ICON  = {"critical": "❌", "warning": "⚠️", "suggestion": "💡"}
+_TYPE_ICON = {"heading": "H", "paragraph": "¶", "list_item": "•", "line": "—"}
+
+
+def _cp_progress_card(job_id: str) -> html.Div:
+    job = _cp_jobs.get(job_id) or {}
+    stage   = job.get("stage", "parse")
+    started = job.get("started_at") or time.time()
+    elapsed = int(time.time() - started)
+
+    current_idx = next((i for i, (k, _) in enumerate(_CP_STAGES) if k == stage), 0)
+    rows = []
+    for i, (key, label) in enumerate(_CP_STAGES):
+        if i < current_idx or (key == "done" and stage == "done"):
+            icon = html.Span("✅", style={"width": "22px", "display": "inline-block"})
+            cls  = "text-success fw-semibold"
+        elif i == current_idx:
+            icon = dbc.Spinner(size="sm", color="primary",
+                               spinner_style={"width": "1rem", "height": "1rem",
+                                              "marginRight": "4px"})
+            cls  = "text-primary fw-bold"
+        else:
+            icon = html.Span("○", style={"width": "22px", "display": "inline-block",
+                                          "color": "#c0c8d4"})
+            cls  = "text-muted"
+        rows.append(html.Div([icon, html.Span(label, className=cls)], className="mb-2"))
+
+    pct = int((current_idx / max(len(_CP_STAGES) - 1, 1)) * 100)
+    if stage == "done":
+        pct = 100
+
+    return dbc.Card(dbc.CardBody([
+        dbc.Row([
+            dbc.Col([html.H6("Running compliance check…", className="fw-bold mb-1"),
+                     html.Small(f"Elapsed: {elapsed}s", className="text-muted")], md=8),
+            dbc.Col(dbc.Badge(f"{pct}%", color="primary", className="float-end fs-6"), md=4),
+        ], className="mb-3"),
+        dbc.Progress(value=pct, striped=True, animated=(stage != "done"),
+                     className="mb-3", style={"height": "8px"}),
+        html.Div(rows),
+    ]), className="shadow-sm", style={"borderLeft": "4px solid #1a4f8b"})
+
+
+def _cp_render_result(filename: str, result: dict, text: str) -> html.Div:
+    findings   = result.get("findings") or []
+    clean      = result.get("clean_count", 0)
+    total      = result.get("total_count", 0)
+    summary    = result.get("summary", "")
+    elapsed    = result.get("elapsed_seconds", 0)
+    el_lookup  = {e["index"]: e for e in compliance_parse_elements(text)}
+
+    criticals  = sum(1 for f in findings if f.get("severity") == "critical")
+    warnings_n = sum(1 for f in findings if f.get("severity") == "warning")
+    suggests   = sum(1 for f in findings if f.get("severity") == "suggestion")
+
+    overall_color = "success" if not findings else ("danger" if criticals else "warning")
+    overall_icon  = "✅" if not findings else ("❌" if criticals else "⚠️")
+
+    stat_badges = []
+    if criticals:
+        stat_badges.append(dbc.Badge(f"{criticals} critical",    color="danger",    className="me-2"))
+    if warnings_n:
+        stat_badges.append(dbc.Badge(f"{warnings_n} warning(s)", color="warning",   className="me-2"))
+    if suggests:
+        stat_badges.append(dbc.Badge(f"{suggests} suggestion(s)", color="info",     className="me-2"))
+    if not findings:
+        stat_badges.append(dbc.Badge("All clear", color="success"))
+
+    banner = dbc.Alert([
+        dbc.Row([
+            dbc.Col([
+                html.Span(overall_icon + " ", style={"fontSize": "1.3rem"}),
+                html.Strong(filename),
+                html.Span(f"  ·  {total} elements reviewed  ·  {clean} clean  ·  {elapsed}s",
+                           className="text-muted ms-2 small"),
+                html.Div(stat_badges, className="mt-2"),
+                html.P(summary, className="mb-0 mt-2 small"),
+            ], md=9),
+            dbc.Col([
+                dbc.Button(
+                    "⬇ Download Report (.docx)",
+                    id="cp-doc-download-btn",
+                    color="light",
+                    size="sm",
+                    className="w-100",
+                    style={"fontWeight": "600"},
+                ),
+                html.Div(id="cp-doc-download-link", className="mt-2 text-center"),
+            ], md=3, className="d-flex flex-column justify-content-center"),
+        ]),
+    ], color=overall_color, className="mb-3")
+
+    if not findings:
+        return html.Div([banner,
+                         html.Div(id="cp-doc-download-btn",  style={"display": "none"}),
+                         html.Div(id="cp-doc-download-link", style={"display": "none"})])
+
+    def _finding_row(f: dict) -> dbc.Card:
+        sev   = f.get("severity", "suggestion")
+        idx   = f.get("index", 0)
+        el    = el_lookup.get(idx, {})
+        etype = el.get("type", "line")
+        etext = el.get("text", "")
+        return dbc.Card(dbc.CardBody([
+            dbc.Row([
+                dbc.Col([
+                    dbc.Badge(_SEV_ICON.get(sev, "•") + " " + sev.upper(),
+                              color=_SEV_COLOR.get(sev, "secondary"),
+                              className="me-2 mb-1", style={"fontSize": "0.72rem"}),
+                    dbc.Badge(_TYPE_ICON.get(etype, "—") + " " + etype,
+                              color="light", text_color="dark",
+                              style={"fontSize": "0.72rem"}),
+                ], md=3, className="d-flex align-items-start flex-wrap gap-1 pt-1"),
+                dbc.Col([
+                    html.Div(f'"{etext[:160]}{"…" if len(etext) > 160 else ""}"',
+                             className="text-muted small fst-italic mb-1"),
+                    html.Div([html.Strong("Finding: ", className="small"),
+                              html.Span(f.get("finding", ""), className="small")]),
+                    html.Div([
+                        dbc.Badge(f"§{f['section']}", color="warning", className="me-1 mt-1",
+                                  style={"fontSize": "0.68rem"}) if f.get("section") else html.Span(),
+                        dbc.Badge(f.get("rule", ""), color="light", text_color="dark",
+                                  style={"fontSize": "0.68rem"}),
+                    ], className="mt-1"),
+                ], md=5),
+                dbc.Col([
+                    html.Div("Fix:", className="text-muted small fw-semibold mb-1"),
+                    html.Div(f.get("solution", ""), className="small",
+                             style={"lineHeight": "1.4"}),
+                ], md=4, style={"borderLeft": "3px solid #e9ecef", "paddingLeft": "12px"}),
+            ], className="g-2 align-items-start"),
+        ]), className="mb-2 shadow-sm",
+           style={"borderLeft": f"4px solid var(--bs-{_SEV_COLOR.get(sev, 'secondary')})"})
+
+    return html.Div([banner, html.Div([_finding_row(f) for f in findings])])
+
+
+# ---------------------------------------------------------------------------
+# Report .docx generator
+# ---------------------------------------------------------------------------
+
+def _build_compliance_report_docx(filename: str, result: dict, text: str) -> bytes:
+    from docx import Document
+    from docx.shared import Pt, RGBColor, Inches
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    import io
+
+    findings  = result.get("findings") or []
+    clean     = result.get("clean_count", 0)
+    total     = result.get("total_count", 0)
+    summary   = result.get("summary", "")
+    elapsed   = result.get("elapsed_seconds", 0)
+    el_lookup = {e["index"]: e for e in compliance_parse_elements(text)}
+
+    criticals  = sum(1 for f in findings if f.get("severity") == "critical")
+    warnings_n = sum(1 for f in findings if f.get("severity") == "warning")
+    suggests   = sum(1 for f in findings if f.get("severity") == "suggestion")
+
+    _SEV_RGB = {
+        "critical":   RGBColor(0xC0, 0x39, 0x2B),
+        "warning":    RGBColor(0xE6, 0x7E, 0x22),
+        "suggestion": RGBColor(0x29, 0x80, 0xB9),
+    }
+    _GREY     = RGBColor(0x7F, 0x8C, 0x8D)
+    _DARK     = RGBColor(0x2C, 0x3E, 0x50)
+    _WARREN   = RGBColor(0x1A, 0x4F, 0x8B)
+
+    doc = Document()
+
+    # Page margins
+    for section in doc.sections:
+        section.top_margin    = Inches(1)
+        section.bottom_margin = Inches(1)
+        section.left_margin   = Inches(1.2)
+        section.right_margin  = Inches(1.2)
+
+    # ---- Title block -------------------------------------------------------
+    t = doc.add_paragraph()
+    t.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    run = t.add_run("Compliance Check Report")
+    run.font.size  = Pt(22)
+    run.font.bold  = True
+    run.font.color.rgb = _WARREN
+
+    sub = doc.add_paragraph()
+    r = sub.add_run(filename)
+    r.font.size  = Pt(12)
+    r.font.color.rgb = _GREY
+
+    meta = doc.add_paragraph()
+    r = meta.add_run(
+        f"Generated: {datetime.utcnow().strftime('%d %B %Y, %H:%M UTC')}  ·  "
+        f"Checked in {elapsed}s"
+    )
+    r.font.size  = Pt(9)
+    r.font.color.rgb = _GREY
+
+    doc.add_paragraph()
+
+    # ---- Summary box (table-as-box) ----------------------------------------
+    doc.add_heading("Summary", level=2)
+
+    tbl = doc.add_table(rows=1, cols=4)
+    tbl.style = "Table Grid"
+    cells = tbl.rows[0].cells
+    for cell, label, val, rgb in [
+        (cells[0], "Total Elements", str(total),     _DARK),
+        (cells[1], "Clean",          str(clean),      RGBColor(0x27, 0xAE, 0x60)),
+        (cells[2], "Issues Found",   str(len(findings)), _SEV_RGB.get("warning", _DARK)),
+        (cells[3], "Critical",       str(criticals),  _SEV_RGB.get("critical", _DARK)),
+    ]:
+        p = cell.paragraphs[0]
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r1 = p.add_run(val + "\n")
+        r1.font.size  = Pt(18)
+        r1.font.bold  = True
+        r1.font.color.rgb = rgb
+        r2 = p.add_run(label)
+        r2.font.size  = Pt(8)
+        r2.font.color.rgb = _GREY
+
+    doc.add_paragraph()
+
+    sev_line = doc.add_paragraph()
+    for label, count, rgb in [
+        ("Critical", criticals,  _SEV_RGB["critical"]),
+        ("Warning",  warnings_n, _SEV_RGB["warning"]),
+        ("Suggestion", suggests, _SEV_RGB["suggestion"]),
+    ]:
+        r = sev_line.add_run(f"  {label}: {count}  ")
+        r.font.bold  = True
+        r.font.color.rgb = rgb
+
+    p = doc.add_paragraph(summary)
+    p.runs[0].font.italic = True
+    p.runs[0].font.color.rgb = _GREY
+
+    doc.add_paragraph()
+
+    # ---- Findings ---------------------------------------------------------
+    if findings:
+        doc.add_heading("Findings", level=2)
+
+        for i, f in enumerate(findings, 1):
+            sev   = f.get("severity", "suggestion")
+            idx   = f.get("index", 0)
+            el    = el_lookup.get(idx, {})
+            etype = el.get("type", "line")
+            etext = el.get("text", "")
+            rgb   = _SEV_RGB.get(sev, _DARK)
+
+            # Finding heading
+            hdr = doc.add_paragraph()
+            rn = hdr.add_run(f"{i}.  [{sev.upper()}]  {f.get('rule', '')}  ")
+            rn.font.bold  = True
+            rn.font.color.rgb = rgb
+            if f.get("section"):
+                rs = hdr.add_run(f"§{f['section']}")
+                rs.font.size  = Pt(9)
+                rs.font.color.rgb = _GREY
+
+            # Element type + original text
+            orig = doc.add_paragraph()
+            rt = orig.add_run(f"{etype.upper()}:  ")
+            rt.font.bold  = True
+            rt.font.size  = Pt(9)
+            rt.font.color.rgb = _GREY
+            ro = orig.add_run(f'"{etext[:300]}"')
+            ro.font.italic = True
+            ro.font.size   = Pt(9)
+            ro.font.color.rgb = _GREY
+
+            # Finding
+            fp = doc.add_paragraph()
+            fp.add_run("Finding:  ").font.bold = True
+            fp.add_run(f.get("finding", ""))
+
+            # Solution (indented, coloured)
+            sp = doc.add_paragraph()
+            sp.paragraph_format.left_indent = Inches(0.3)
+            sr = sp.add_run("Fix:  ")
+            sr.font.bold  = True
+            sr.font.color.rgb = RGBColor(0x27, 0xAE, 0x60)
+            sp.add_run(f.get("solution", ""))
+
+            doc.add_paragraph()
+    else:
+        doc.add_paragraph("No compliance issues were found. All elements are fully compliant.")
+
+    # ---- Footer -----------------------------------------------------------
+    doc.add_page_break()
+    ft = doc.add_paragraph()
+    ft.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = ft.add_run("Generated by Warren Compliance Advisor  ·  meetwarren.co.uk")
+    r.font.size  = Pt(8)
+    r.font.color.rgb = _GREY
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Kickoff callback — starts background job, returns progress card
+# ---------------------------------------------------------------------------
+
+@app.callback(
+    Output("cp-doc-result",  "children",  allow_duplicate=True),
+    Output("cp-doc-job-id",  "data"),
+    Output("cp-doc-poll",    "disabled",  allow_duplicate=True),
+    Output("cp-doc-check-btn", "disabled", allow_duplicate=True),
+    Input("cp-doc-check-btn", "n_clicks"),
+    State("cp-doc-upload",   "contents"),
+    State("cp-doc-upload",   "filename"),
+    prevent_initial_call=True,
+)
+def _cp_kickoff(_n, contents, filename):
+    if not contents or not filename:
+        return dbc.Alert("No file uploaded.", color="warning"), no_update, True, False
+
+    text, err = _extract_doc_text(filename, contents)
+    if err:
+        return dbc.Alert(err, color="danger"), no_update, True, False
+    if not text.strip():
+        return dbc.Alert("File appears to be empty.", color="warning"), no_update, True, False
+
+    job_id = uuid.uuid4().hex[:12]
+    with _cp_jobs_lock:
+        _cp_jobs[job_id] = {
+            "stage": "parse", "started_at": time.time(),
+            "error": None, "result": None, "text": text, "filename": filename,
+        }
+
+    def _worker():
+        try:
+            with _cp_jobs_lock:
+                _cp_jobs[job_id]["stage"] = "parse"
+            elements = compliance_parse_elements(text)
+
+            with _cp_jobs_lock:
+                _cp_jobs[job_id]["stage"] = "hard_rules"
+            rulebook = load_rulebook()
+
+            with _cp_jobs_lock:
+                _cp_jobs[job_id]["stage"] = "llm"
+            client = build_anthropic_client(cfg)
+            result = advise_document(
+                elements, rulebook=rulebook, client=client,
+                model=cfg.compliance_model or cfg.anthropic_model,
+            )
+
+            with _cp_jobs_lock:
+                _cp_jobs[job_id]["stage"]  = "done"
+                _cp_jobs[job_id]["result"] = result
+        except Exception as e:
+            with _cp_jobs_lock:
+                _cp_jobs[job_id]["stage"] = "done"
+                _cp_jobs[job_id]["error"] = f"{type(e).__name__}: {e}"
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return _cp_progress_card(job_id), job_id, False, True
+
+
+# ---------------------------------------------------------------------------
+# Poll callback — refreshes progress or renders final result
+# ---------------------------------------------------------------------------
+
+@app.callback(
+    Output("cp-doc-result",       "children",  allow_duplicate=True),
+    Output("cp-doc-poll",         "disabled",  allow_duplicate=True),
+    Output("cp-doc-check-btn",    "disabled",  allow_duplicate=True),
+    Output("cp-doc-result-store", "data"),
+    Input("cp-doc-poll",   "n_intervals"),
+    State("cp-doc-job-id", "data"),
+    prevent_initial_call=True,
+)
+def _cp_poll(_n, job_id):
+    if not job_id or job_id not in _cp_jobs:
+        return no_update, True, False, no_update
+
+    with _cp_jobs_lock:
+        job = dict(_cp_jobs[job_id])
+
+    if job.get("error"):
+        _cp_jobs.pop(job_id, None)
+        return (dbc.Alert([html.Strong("Compliance check failed: "), job["error"]],
+                          color="danger"),
+                True, False, no_update)
+
+    if job.get("stage") == "done" and job.get("result") is not None:
+        result   = job["result"]
+        text     = job["text"]
+        filename = job["filename"]
+        _cp_jobs.pop(job_id, None)
+        rendered = _cp_render_result(filename, result, text)
+        store    = {"result": result, "text": text, "filename": filename}
+        return rendered, True, False, store
+
+    return _cp_progress_card(job_id), False, True, no_update
+
+
+# ---------------------------------------------------------------------------
+# Download callback — builds .docx from stored result and serves it
+# ---------------------------------------------------------------------------
+
+@app.callback(
+    Output("cp-doc-download-link", "children"),
+    Input("cp-doc-download-btn",   "n_clicks"),
+    State("cp-doc-result-store",   "data"),
+    prevent_initial_call=True,
+)
+def _cp_download_report(_n, store):
+    if not store:
+        return dbc.Alert("No result to download yet.", color="warning", className="small py-1")
+
+    result   = store.get("result", {})
+    text     = store.get("text", "")
+    filename = store.get("filename", "document")
+
+    try:
+        docx_bytes = _build_compliance_report_docx(filename, result, text)
+    except Exception as e:
+        return dbc.Alert(f"Report generation failed: {e}", color="danger", className="small py-1")
+
+    stem = os.path.splitext(os.path.basename(filename))[0]
+    out_name = f"compliance-report-{stem}-{datetime.utcnow().strftime('%Y%m%d-%H%M')}.docx"
+    out_path = os.path.join(cfg.output_dir, out_name)
+    os.makedirs(cfg.output_dir, exist_ok=True)
+    with open(out_path, "wb") as f:
+        f.write(docx_bytes)
+
+    return dbc.Button(
+        f"⬇ {out_name}",
+        href=f"/downloads/{out_name}",
+        external_link=True,
+        download=out_name,
+        color="success",
+        size="sm",
+        className="w-100",
+    )
 
 
 # ===========================================================================
@@ -3086,6 +3790,15 @@ def _ar_preview(_clicks):
         except OSError:
             preview_html = "<p>Could not load HTML preview.</p>"
 
+    # Load full quality dict from JSON sidecar for the expandable report.
+    quality_full = None
+    if entry.json_path and os.path.isfile(entry.json_path):
+        try:
+            with open(entry.json_path, encoding="utf-8") as f:
+                quality_full = json.load(f).get("quality") or None
+        except (OSError, json.JSONDecodeError):
+            pass
+
     download_buttons = []
     for ext in _FORMAT_ORDER:
         p = entry.paths.get(ext)
@@ -3109,11 +3822,10 @@ def _ar_preview(_clicks):
     ]
     if entry.kind == "blog":
         info_rows += [
-            ("Word count",          str(entry.word_count or "—")),
-            ("Sources cited",       str(entry.sources_cited_count)),
-            ("Quality score",
-             (f"{entry.quality_score}/100  ({entry.quality_grade})"
-              if entry.quality_score is not None else "—")),
+            ("Word count",    str(entry.word_count or "—")),
+            ("Sources cited", str(entry.sources_cited_count)),
+            ("Quality score", _ar_quality_badge(entry.quality_score,
+                                                 entry.quality_grade)),
         ]
     info_rows.append((
         "Compliance",
@@ -3131,6 +3843,17 @@ def _ar_preview(_clicks):
             ]) for label, value in info_rows
         ])
     ], borderless=True, size="sm", className="mb-0")
+
+    # Expandable quality report — shown only for blogs with a quality block.
+    quality_widget = html.Div()
+    if entry.kind == "blog" and quality_full:
+        quality_widget = dbc.Accordion([
+            dbc.AccordionItem(
+                _quality_card(quality_full),
+                title=f"📊 Quality Report — {entry.quality_score}/100  ({entry.quality_grade})",
+            ),
+        ], start_collapsed=True, flush=False,
+           className="mt-3 shadow-sm")
 
     return dbc.Card(dbc.CardBody([
         dbc.Row([
@@ -3153,7 +3876,10 @@ def _ar_preview(_clicks):
         html.Div("Download as:", className="text-muted small mb-1"),
         html.Div(download_buttons, className="mb-3"),
         dbc.Row([
-            dbc.Col(info_table, md=4),
+            dbc.Col([
+                info_table,
+                quality_widget,
+            ], md=4),
             dbc.Col(html.Iframe(
                 srcDoc=preview_html,
                 style={"width": "100%", "height": "640px",

@@ -25,8 +25,8 @@ log = logging.getLogger(__name__)
 
 
 # Threshold below which we'll attempt a revision pass.
-DEFAULT_TARGET_SCORE = 78
-DEFAULT_CATEGORY_FLOOR_PCT = 0.55   # 55% of category max → flag for rework
+DEFAULT_TARGET_SCORE = 85
+DEFAULT_CATEGORY_FLOOR_PCT = 0.50   # 50% of category max → flag for rework
 
 # Max ratio (current / max) — categories below this become rewrite candidates.
 _CATEGORY_LABEL = {
@@ -199,7 +199,7 @@ def revise_for_quality(
     model: str,
     kind: str = "blog",
     target_score: int = DEFAULT_TARGET_SCORE,
-    max_iterations: int = 2,
+    max_iterations: int = 3,
     progress_cb: Optional[Callable[[str], None]] = None,
 ) -> dict:
     """Iteratively rewrite the weakest category until score ≥ target_score
