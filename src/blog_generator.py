@@ -726,11 +726,13 @@ def _seo_head(post: dict) -> str:
     schema_flags = (post.get("_seo_brief") or {}).get("schema_flags") or []
     ld_list = build_jsonld(post)
     if "Speakable" in schema_flags:
-        ld_list.append({
-            "@context": "https://schema.org",
-            "@type": "SpeakableSpecification",
-            "cssSelector": [".tldr", "h1", "h2"],
-        })
+        for ld in ld_list:
+            if ld.get("@type") in ("Article", "BlogPosting", "NewsArticle"):
+                speakable = ld.get("speakable")
+                if isinstance(speakable, dict) and isinstance(speakable.get("cssSelector"), list):
+                    if "h2" not in speakable["cssSelector"]:
+                        speakable["cssSelector"].append("h2")
+                break
     ld_blocks = "".join(
         f'\n  <script type="application/ld+json">{json.dumps(d, ensure_ascii=False)}</script>'
         for d in ld_list
