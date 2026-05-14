@@ -24,6 +24,8 @@ from src.archive import (archive_stats, delete_entry as archive_delete_entry,
                           get_entry as archive_get_entry,
                           list_archive)
 from src.blog_generator import generate_blog_post, blog_to_html, blog_to_text
+from src.seo_agent import generate_seo_brief
+from src.visual_extractor import extract_visuals
 from src.blog_quality import quick_score as blog_quick_score
 from src.compliance import ensure_compliant, load_rulebook
 from src.compliance.advisor import advise_document, parse_elements as compliance_parse_elements
@@ -986,15 +988,17 @@ _CP_STAGES = [
 
 # Stage labels shown in the progress card. Must match what the worker sets.
 _STAGES = [
-    ("collect",      "Loading article context"),
-    ("draft",        "Drafting with Claude"),
-    ("verify",       "Verifying source URLs"),
-    ("quality_loop",  "Quality-revision loop (blog only)"),
-    ("brand_review",  "Brand voice audit"),
-    ("compliance",    "Compliance grading + revision"),
-    ("export",       "Rendering PDF, DOCX, Markdown, EML"),
-    ("quality",      "Final 100-pt rubric score"),
-    ("done",         "Done"),
+    ("collect",         "Loading article context"),
+    ("seo_brief",       "SEO/AEO brief (Pass 1)"),
+    ("draft",           "Drafting with Claude (Pass 2–3)"),
+    ("visual_extract",  "Extracting visual elements (Pass 4)"),
+    ("verify",          "Verifying source URLs"),
+    ("quality_loop",    "Quality-revision loop (blog only)"),
+    ("brand_review",    "Brand voice audit"),
+    ("compliance",      "Compliance grading + revision"),
+    ("export",          "Rendering PDF, DOCX, Markdown, EML"),
+    ("quality",         "Final 100-pt rubric score"),
+    ("done",            "Done"),
 ]
 
 
@@ -1141,13 +1145,25 @@ def _run_generation_job(job_id: str, summaries: list, content_type: str,
         client = build_anthropic_client(cfg)
         os.makedirs(cfg.output_dir, exist_ok=True)
 
+        # --- Pass 1: SEO/AEO brief -------------------------------------------
+        _set_stage(job_id, "seo_brief", sub="analysing keyword + AEO signals")
+        seo_brief = None
+        try:
+            seo_brief = generate_seo_brief(
+                summaries, client, cfg.anthropic_model,
+                editor_angle=editor_angle,
+            )
+        except Exception as e:
+            print(f"SEO brief failed (non-fatal): {e}")
+
         sub = f"{content_type} from {len(summaries)} article(s)"
         if editor_angle:
             sub += f" · angle: {editor_angle[:50]}…" if len(editor_angle) > 50 else f" · angle set"
         _set_stage(job_id, "draft", sub=sub)
         if content_type == "newsletter":
             result = generate_newsletter(summaries, client, cfg.anthropic_model,
-                                          editor_angle=editor_angle)
+                                          editor_angle=editor_angle,
+                                          seo_brief=seo_brief)
             if not result:
                 raise RuntimeError("Newsletter generation returned no content.")
             out_html, out_text = to_html(result), to_text(result)
@@ -1163,6 +1179,7 @@ def _run_generation_job(job_id: str, summaries: list, content_type: str,
                 summaries, client, cfg.anthropic_model,
                 existing_posts=existing_corpus,
                 editor_angle=editor_angle,
+                seo_brief=seo_brief,
                 progress_cb=lambda s: _set_stage(job_id, "draft", sub=s),
             )
             if not result:
@@ -1173,6 +1190,19 @@ def _run_generation_job(job_id: str, summaries: list, content_type: str,
             kind = "blog"
         else:
             raise RuntimeError(f"Unknown content type: {content_type}")
+
+        # --- Pass 4: Visual extraction ---------------------------------------
+        if result:
+            _set_stage(job_id, "visual_extract",
+                       sub=f"mining data from {kind} for visual elements")
+            try:
+                visual_elements = extract_visuals(
+                    result, summaries, kind, client, cfg.anthropic_model,
+                )
+                if visual_elements:
+                    result["visual_elements"] = visual_elements
+            except Exception as e:
+                print(f"Visual extraction failed (non-fatal): {e}")
 
         # --- Source verification (catches LLM-hallucinated URLs) ------------
         verification = None
