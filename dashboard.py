@@ -1201,6 +1201,12 @@ def _run_generation_job(job_id: str, summaries: list, content_type: str,
                 )
                 if visual_elements:
                     result["visual_elements"] = visual_elements
+                    if kind == "blog":
+                        out_html = blog_to_html(result)
+                        out_text = blog_to_text(result)
+                    else:
+                        out_html = to_html(result)
+                        out_text = to_text(result)
             except Exception as e:
                 print(f"Visual extraction failed (non-fatal): {e}")
 
