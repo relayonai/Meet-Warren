@@ -68,7 +68,7 @@ Each input article carries: title, url, source, published_at, category, relevanc
 a `summary` (2-3 sentences), `key_points` (3-5 bullets), and an `excerpt` (raw text from
 the original article). USE the key_points and excerpt — do not just paraphrase the summary.
 
-{diversity_note}{angle_note}
+{diversity_note}{angle_note}{seo_note}
 Today's edition date is: {today_human}. Use this when you need to refer to "today".
 
 Return a JSON object that EXACTLY matches this schema (do not add or omit keys):
@@ -116,7 +116,7 @@ Article records (JSON):
 
 def generate_newsletter(
     article_summaries: List[dict], client: anthropic.Anthropic, model: str,
-    *, editor_angle: Optional[str] = None,
+    *, editor_angle: Optional[str] = None, seo_brief: Optional[dict] = None,
 ) -> Optional[dict]:
     if not article_summaries:
         return None
@@ -134,11 +134,20 @@ def generate_newsletter(
             f"whole edition, including the editor_pick): {editor_angle.strip()}\n"
         )
 
+    seo_note = ""
+    if seo_brief and seo_brief.get("primary_keyword"):
+        seo_note = (
+            f"\n★ SEO HINT: Primary keyword for this edition: "
+            f"'{seo_brief['primary_keyword']}'. "
+            f"Use it naturally in subject_line and intro where appropriate.\n"
+        )
+
     prompt = USER_TEMPLATE.format(
         articles_json=json.dumps(article_summaries, ensure_ascii=False, indent=2),
         today_human=today_human,
         diversity_note=diversity_note,
         angle_note=angle_note,
+        seo_note=seo_note,
     )
     try:
         resp = client.messages.create(
