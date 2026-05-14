@@ -79,3 +79,75 @@ def test_callout_renders_body():
 
 def test_callout_empty_body_returns_empty():
     assert render_callout({"icon": "⚠", "heading": "Note", "body": ""}) == ""
+
+
+# ── email_stat_row ───────────────────────────────────────────────────────────
+
+def test_email_stat_row_renders():
+    ve = {
+        "type": "email_stat_row",
+        "after_section": -1,
+        "cards": [
+            {"label": "Inflation", "value": "2.6%", "note": "ONS, Mar 2026"},
+            {"label": "Base Rate",  "value": "5.25%", "note": "BoE"},
+        ],
+    }
+    html = render_email_stat_row(ve)
+    assert "2.6%" in html
+    assert "Inflation" in html
+    assert "5.25%" in html
+    assert "<script" not in html
+    assert "<canvas" not in html
+
+
+def test_email_stat_row_empty_returns_empty():
+    assert render_email_stat_row({"cards": []}) == ""
+
+
+# ── email_table ──────────────────────────────────────────────────────────────
+
+def test_email_table_renders():
+    ve = {
+        "type": "email_table",
+        "after_section": 0,
+        "title": "Best-buy savings",
+        "headers": ["Provider", "Rate"],
+        "rows": [["Nationwide", "4.75%"], ["Barclays", "4.50%"]],
+    }
+    html = render_email_table(ve)
+    assert "Nationwide" in html
+    assert "4.75%" in html
+    assert "<script" not in html
+    assert 'style="' in html  # all styles inline
+
+
+def test_email_table_empty_returns_empty():
+    assert render_email_table({"headers": [], "rows": []}) == ""
+
+
+# ── email_divider_callout ────────────────────────────────────────────────────
+
+def test_email_divider_callout_renders():
+    ve = {
+        "type": "email_divider_callout",
+        "after_section": 1,
+        "heading": "Key takeaway",
+        "body": "Rates are falling but mortgage costs remain high.",
+    }
+    html = render_email_divider_callout(ve)
+    assert "Key takeaway" in html
+    assert "Rates are falling" in html
+    assert "<script" not in html
+
+
+def test_email_divider_callout_empty_body_returns_empty():
+    assert render_email_divider_callout({"heading": "Note", "body": ""}) == ""
+
+
+# ── render_email_visual dispatcher ──────────────────────────────────────────
+
+def test_render_email_visual_dispatches_correctly():
+    assert render_email_visual({"type": "email_stat_row", "cards": []}) == ""
+    assert render_email_visual({"type": "unknown_type"}) == ""
+    ve = {"type": "email_divider_callout", "heading": "H", "body": "Body text here."}
+    assert "Body text here." in render_email_visual(ve)

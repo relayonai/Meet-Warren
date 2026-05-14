@@ -359,24 +359,103 @@ def render_callout(ve: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Email visual renderers — stubs (implemented in Task 2)
+# Email-safe visual renderers — no JS, no Canvas, max-width 600px
+# All styles must be inline. Safe for Outlook, Apple Mail, Gmail.
 # ---------------------------------------------------------------------------
 
 def render_email_stat_row(ve: dict) -> str:
-    """Email-safe stat row. Full implementation added in Task 2."""
-    raise NotImplementedError("render_email_stat_row is implemented in Task 2")
+    """Render a compact stat row as an inline HTML table (email-safe)."""
+    cards = ve.get("cards") or []
+    if not cards:
+        return ""
+    cells = ""
+    for card in cards:
+        label = escape(str(card.get("label", "")))
+        value = escape(str(card.get("value", "")))
+        note  = escape(str(card.get("note", "")))
+        note_td = (
+            f'<br><span style="font-size:10px;color:#5a6478;">{note}</span>'
+            if note else ""
+        )
+        cells += (
+            f'<td style="padding:14px 16px;text-align:center;border:1px solid #e6e9ef;'
+            f'background:#ffffff;">'
+            f'<div style="font-size:10px;font-weight:700;text-transform:uppercase;'
+            f'letter-spacing:0.08em;color:#5a6478;margin-bottom:4px;">{label}</div>'
+            f'<div style="font-size:24px;font-weight:800;color:#0b2545;line-height:1;">'
+            f'{value}</div>{note_td}'
+            f'</td>'
+        )
+    return (
+        f'<table width="100%" cellpadding="0" cellspacing="8" border="0" '
+        f'style="margin:16px 0;max-width:600px;">'
+        f'<tr>{cells}</tr>'
+        f'</table>'
+    )
 
 
 def render_email_table(ve: dict) -> str:
-    """Email-safe comparison table. Full implementation added in Task 2."""
-    raise NotImplementedError("render_email_table is implemented in Task 2")
+    """Render a plain bordered comparison table (email-safe)."""
+    title   = ve.get("title", "")
+    headers = ve.get("headers") or []
+    rows    = ve.get("rows") or []
+    if not headers and not rows:
+        return ""
+    _TH = ("padding:8px 12px;text-align:left;background:#0b2545;color:#ffffff;"
+           "font-size:12px;font-weight:700;border:1px solid #e6e9ef;")
+    _TD = "padding:8px 12px;font-size:12px;color:#1a1f36;border:1px solid #e6e9ef;"
+    _TD_ALT = _TD + "background:#f6f8fb;"
+    title_html = (
+        f'<div style="font-size:11px;font-weight:700;text-transform:uppercase;'
+        f'letter-spacing:0.08em;color:#5a6478;margin-bottom:8px;">{escape(title)}</div>'
+        if title else ""
+    )
+    ths = "".join(f'<th style="{_TH}">{escape(str(h))}</th>' for h in headers)
+    trs = ""
+    for i, row in enumerate(rows):
+        style = _TD_ALT if i % 2 else _TD
+        cells = "".join(f'<td style="{style}">{escape(str(c))}</td>' for c in row)
+        trs += f'<tr>{cells}</tr>'
+    return (
+        f'<div style="margin:16px 0;">'
+        f'{title_html}'
+        f'<table width="100%" cellpadding="0" cellspacing="0" border="0" '
+        f'style="max-width:600px;border-collapse:collapse;">'
+        f'<thead><tr>{ths}</tr></thead>'
+        f'<tbody>{trs}</tbody>'
+        f'</table></div>'
+    )
 
 
 def render_email_divider_callout(ve: dict) -> str:
-    """Email-safe divider callout. Full implementation added in Task 2."""
-    raise NotImplementedError("render_email_divider_callout is implemented in Task 2")
+    """Render a styled blockquote-style callout box (email-safe)."""
+    heading = escape(str(ve.get("heading", "")))
+    body    = escape(str(ve.get("body", "")))
+    if not body:
+        return ""
+    heading_html = (
+        f'<div style="font-size:13px;font-weight:700;color:#0b2545;margin-bottom:6px;">'
+        f'{heading}</div>'
+        if heading else ""
+    )
+    return (
+        f'<table width="100%" cellpadding="0" cellspacing="0" border="0" '
+        f'style="margin:16px 0;max-width:600px;">'
+        f'<tr><td style="padding:14px 18px;border-left:4px solid #c9a227;'
+        f'background:#fdf6e3;">'
+        f'{heading_html}'
+        f'<div style="font-size:14px;line-height:1.55;color:#1a1f36;">{body}</div>'
+        f'</td></tr></table>'
+    )
 
 
 def render_email_visual(ve: dict) -> str:
-    """Dispatcher for email visual elements. Full implementation added in Task 2."""
-    raise NotImplementedError("render_email_visual is implemented in Task 2")
+    """Dispatcher for email-safe visual types."""
+    vtype = ve.get("type", "")
+    if vtype == "email_stat_row":
+        return render_email_stat_row(ve)
+    elif vtype == "email_table":
+        return render_email_table(ve)
+    elif vtype == "email_divider_callout":
+        return render_email_divider_callout(ve)
+    return ""
