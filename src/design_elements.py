@@ -314,7 +314,7 @@ def render_comparison_card(ve: dict) -> str:
     )
     header_cells = "".join(
         f'<th style="padding:10px 14px;text-align:left;'
-        f'background:{"#c9a227" if i > 0 else NAVY};color:#ffffff;'
+        f'background:{ACCENT if i > 0 else NAVY};color:#ffffff;'
         f'font-size:13px;font-weight:700;border:1px solid {BORDER};white-space:nowrap;">'
         f'{escape(str(c))}</th>'
         for i, c in enumerate(columns)
