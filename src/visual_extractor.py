@@ -149,6 +149,9 @@ def extract_visuals(
 
     Returns [] on failure — content renders without visuals (graceful degradation).
     """
+    if not content:
+        return []
+
     content_text = _content_to_text(content, kind)
     if not content_text.strip():
         return []
@@ -161,7 +164,7 @@ def extract_visuals(
     prompt = template.format(
         max_visuals=max_visuals,
         content_text=content_text[:8000],
-        articles_json=json.dumps(article_summaries, ensure_ascii=False, indent=2)[:3000],
+        articles_json=json.dumps(article_summaries[:5], ensure_ascii=False, indent=2),
     )
     try:
         resp = client.messages.create(
@@ -174,6 +177,9 @@ def extract_visuals(
         data = parse_json_response(text)
     except (anthropic.APIError, json.JSONDecodeError, IndexError, AttributeError) as exc:
         log.warning("Visual extraction failed (non-fatal): %s", exc)
+        return []
+
+    if not isinstance(data, dict):
         return []
 
     elements = data.get("visual_elements") or []
