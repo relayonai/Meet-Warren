@@ -399,7 +399,7 @@ def render_email_table(ve: dict) -> str:
     title   = ve.get("title", "")
     headers = ve.get("headers") or []
     rows    = ve.get("rows") or []
-    if not headers and not rows:
+    if not headers or not rows:
         return ""
     _TH = ("padding:8px 12px;text-align:left;background:#0b2545;color:#ffffff;"
            "font-size:12px;font-weight:700;border:1px solid #e6e9ef;")
