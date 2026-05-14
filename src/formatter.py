@@ -5,6 +5,8 @@ from datetime import date, datetime, timezone
 from html import escape
 from typing import Any, Dict, List, Tuple
 
+from .design_elements import render_email_visual
+
 
 # ---------- design tokens (kept inline so output is portable) ---------------
 NAVY     = "#0b2545"
@@ -250,7 +252,27 @@ def to_html(newsletter: Dict[str, Any]) -> str:
     closing       = escape(newsletter.get("closing", "") or "")
     signature     = escape(newsletter.get("signature", "The Warren Editorial Desk") or "")
 
-    sections_html = "".join(_section_block(s) for s in newsletter.get("sections", []))
+    _email_ves = newsletter.get("visual_elements") or []
+    _ve_by_section: dict[int, list] = {}
+    _ve_pre: list = []
+    for _ve in _email_ves:
+        _ai = _ve.get("after_section")
+        try:
+            _ai = int(_ai)
+        except (TypeError, ValueError):
+            continue
+        if _ai == -1:
+            _ve_pre.append(_ve)
+        else:
+            _ve_by_section.setdefault(_ai, []).append(_ve)
+
+    _pre_html = "".join(render_email_visual(v) for v in _ve_pre)
+    sections_html = ""
+    for _i, _s in enumerate(newsletter.get("sections", []) or []):
+        sections_html += _section_block(_s)
+        for _v in _ve_by_section.get(_i, []):
+            sections_html += render_email_visual(_v)
+    sections_html = _pre_html + sections_html
     pick_html     = _editor_pick_block(newsletter.get("editor_pick"))
     stats_html    = _by_the_numbers_block(_by_the_numbers(newsletter))
     cal_html      = _calendar_block(_on_the_calendar())

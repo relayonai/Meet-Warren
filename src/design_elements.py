@@ -262,3 +262,200 @@ def has_charts(visual_elements: list) -> bool:
         (ve.get("type") or "").startswith("chart_")
         for ve in (visual_elements or [])
     )
+
+
+# ---------------------------------------------------------------------------
+# Blog visual renderers — stat cards, comparison cards, callouts
+# ---------------------------------------------------------------------------
+
+def render_stat_card_row(ve: dict) -> str:
+    """Render a horizontal strip of 2–4 large-number stat cards."""
+    cards = ve.get("cards") or []
+    if not cards:
+        return ""
+    card_html = ""
+    for card in cards:
+        label = escape(str(card.get("label", "")))
+        value = escape(str(card.get("value", "")))
+        note  = escape(str(card.get("note", "")))
+        note_html = (
+            f'<div style="font-size:11px;color:{MUTED};margin-top:4px;">{note}</div>'
+            if note else ""
+        )
+        card_html += (
+            f'<div style="flex:1;min-width:120px;text-align:center;padding:16px 12px;'
+            f'background:#ffffff;border:1px solid {BORDER};border-radius:8px;">'
+            f'<div style="font-size:11px;font-weight:700;letter-spacing:0.1em;'
+            f'text-transform:uppercase;color:{MUTED};margin-bottom:6px;">{label}</div>'
+            f'<div style="font-size:28px;font-weight:800;color:{NAVY};line-height:1;">{value}</div>'
+            f'{note_html}'
+            f'</div>'
+        )
+    return (
+        f'<div style="margin:28px 0;padding:20px 22px;background:{SOFT_BG};'
+        f'border:1px solid {BORDER};border-radius:10px;">'
+        f'<div style="display:flex;flex-wrap:wrap;gap:12px;">'
+        f'{card_html}'
+        f'</div></div>'
+    )
+
+
+def render_comparison_card(ve: dict) -> str:
+    """Render an interactive side-by-side comparison table."""
+    title   = ve.get("title", "")
+    columns = ve.get("columns") or []
+    rows    = ve.get("rows") or []
+    if not columns or not rows:
+        return ""
+    title_html = (
+        f'<div style="font-size:12px;font-weight:700;letter-spacing:0.1em;'
+        f'text-transform:uppercase;color:{MUTED};margin-bottom:12px;">{escape(title)}</div>'
+        if title else ""
+    )
+    header_cells = "".join(
+        f'<th style="padding:10px 14px;text-align:left;'
+        f'background:{ACCENT if i > 0 else NAVY};color:#ffffff;'
+        f'font-size:13px;font-weight:700;border:1px solid {BORDER};white-space:nowrap;">'
+        f'{escape(str(c))}</th>'
+        for i, c in enumerate(columns)
+    )
+    body_rows = ""
+    for i, row in enumerate(rows):
+        style = _TD_ALT if i % 2 else _TD_BASE
+        cells = "".join(f'<td style="{style}">{escape(str(c))}</td>' for c in row)
+        body_rows += f'<tr>{cells}</tr>'
+    return (
+        f'<div style="margin:28px 0;padding:20px 22px;background:{SOFT_BG};'
+        f'border:1px solid {BORDER};border-radius:10px;">'
+        f'{title_html}'
+        f'<div style="overflow-x:auto;">'
+        f'<table style="width:100%;border-collapse:collapse;">'
+        f'<thead><tr>{header_cells}</tr></thead>'
+        f'<tbody>{body_rows}</tbody>'
+        f'</table></div></div>'
+    )
+
+
+def render_callout(ve: dict) -> str:
+    """Render a highlighted callout box for warnings or key notes."""
+    icon    = escape(str(ve.get("icon", "ℹ")))
+    heading = escape(str(ve.get("heading", "")))
+    body    = escape(str(ve.get("body", "")))
+    if not body:
+        return ""
+    heading_html = (
+        f'<div style="font-size:13px;font-weight:700;color:{NAVY};margin-bottom:6px;">'
+        f'{icon} {heading}</div>'
+        if heading
+        else f'<div style="font-size:16px;margin-bottom:6px;">{icon}</div>'
+    )
+    return (
+        f'<aside style="margin:24px 0;padding:18px 22px;'
+        f'border-left:4px solid {ACCENT};background:#fdf6e3;border-radius:0 8px 8px 0;">'
+        f'{heading_html}'
+        f'<div style="font-size:15px;line-height:1.65;color:{INK};">{body}</div>'
+        f'</aside>'
+    )
+
+
+# ---------------------------------------------------------------------------
+# Email-safe visual renderers — no JS, no Canvas, max-width 600px
+# All styles must be inline. Safe for Outlook, Apple Mail, Gmail.
+# ---------------------------------------------------------------------------
+
+def render_email_stat_row(ve: dict) -> str:
+    """Render a compact stat row as an inline HTML table (email-safe)."""
+    cards = ve.get("cards") or []
+    if not cards:
+        return ""
+    cells = ""
+    for card in cards:
+        label = escape(str(card.get("label", "")))
+        value = escape(str(card.get("value", "")))
+        note  = escape(str(card.get("note", "")))
+        note_td = (
+            f'<br><span style="font-size:10px;color:#5a6478;">{note}</span>'
+            if note else ""
+        )
+        cells += (
+            f'<td style="padding:14px 16px;text-align:center;border:1px solid #e6e9ef;'
+            f'background:#ffffff;">'
+            f'<div style="font-size:10px;font-weight:700;text-transform:uppercase;'
+            f'letter-spacing:0.08em;color:#5a6478;margin-bottom:4px;">{label}</div>'
+            f'<div style="font-size:24px;font-weight:800;color:#0b2545;line-height:1;">'
+            f'{value}</div>{note_td}'
+            f'</td>'
+        )
+    return (
+        f'<table width="100%" cellpadding="0" cellspacing="8" border="0" '
+        f'style="margin:16px 0;max-width:600px;">'
+        f'<tr>{cells}</tr>'
+        f'</table>'
+    )
+
+
+def render_email_table(ve: dict) -> str:
+    """Render a plain bordered comparison table (email-safe)."""
+    title   = ve.get("title", "")
+    headers = ve.get("headers") or []
+    rows    = ve.get("rows") or []
+    if not headers or not rows:
+        return ""
+    _TH = ("padding:8px 12px;text-align:left;background:#0b2545;color:#ffffff;"
+           "font-size:12px;font-weight:700;border:1px solid #e6e9ef;")
+    _TD = "padding:8px 12px;font-size:12px;color:#1a1f36;border:1px solid #e6e9ef;"
+    _TD_ALT = _TD + "background:#f6f8fb;"
+    title_html = (
+        f'<div style="font-size:11px;font-weight:700;text-transform:uppercase;'
+        f'letter-spacing:0.08em;color:#5a6478;margin-bottom:8px;">{escape(title)}</div>'
+        if title else ""
+    )
+    ths = "".join(f'<th style="{_TH}">{escape(str(h))}</th>' for h in headers)
+    trs = ""
+    for i, row in enumerate(rows):
+        style = _TD_ALT if i % 2 else _TD
+        cells = "".join(f'<td style="{style}">{escape(str(c))}</td>' for c in row)
+        trs += f'<tr>{cells}</tr>'
+    return (
+        f'<div style="margin:16px 0;">'
+        f'{title_html}'
+        f'<table width="100%" cellpadding="0" cellspacing="0" border="0" '
+        f'style="max-width:600px;border-collapse:collapse;">'
+        f'<thead><tr>{ths}</tr></thead>'
+        f'<tbody>{trs}</tbody>'
+        f'</table></div>'
+    )
+
+
+def render_email_divider_callout(ve: dict) -> str:
+    """Render a styled blockquote-style callout box (email-safe)."""
+    heading = escape(str(ve.get("heading", "")))
+    body    = escape(str(ve.get("body", "")))
+    if not body:
+        return ""
+    heading_html = (
+        f'<div style="font-size:13px;font-weight:700;color:#0b2545;margin-bottom:6px;">'
+        f'{heading}</div>'
+        if heading else ""
+    )
+    return (
+        f'<table width="100%" cellpadding="0" cellspacing="0" border="0" '
+        f'style="margin:16px 0;max-width:600px;">'
+        f'<tr><td style="padding:14px 18px;border-left:4px solid #c9a227;'
+        f'background:#fdf6e3;">'
+        f'{heading_html}'
+        f'<div style="font-size:14px;line-height:1.55;color:#1a1f36;">{body}</div>'
+        f'</td></tr></table>'
+    )
+
+
+def render_email_visual(ve: dict) -> str:
+    """Dispatcher for email-safe visual types."""
+    vtype = ve.get("type", "")
+    if vtype == "email_stat_row":
+        return render_email_stat_row(ve)
+    elif vtype == "email_table":
+        return render_email_table(ve)
+    elif vtype == "email_divider_callout":
+        return render_email_divider_callout(ve)
+    return ""

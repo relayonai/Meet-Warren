@@ -170,7 +170,7 @@ def _revise_once(post: dict, score: dict, target_category: str,
     # touch dates, reading_time (computed from word count), or our internal
     # bookkeeping like _outline.
     for k in ("published_iso", "published_human", "reading_time_minutes",
-              "_diversity_warning", "_outline"):
+              "_diversity_warning", "_outline", "_seo_brief"):
         if k in post:
             merged[k] = post[k]
 
