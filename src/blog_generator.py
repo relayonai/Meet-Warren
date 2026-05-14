@@ -15,6 +15,7 @@ from .brand_voice import voice_block
 from .design_elements import (
     is_markdown_table, markdown_table_chunk_to_html,
     render_table_html, render_chart_js, has_charts, CHARTJS_CDN,
+    render_stat_card_row, render_comparison_card, render_callout,
 )
 
 log = logging.getLogger(__name__)
@@ -753,6 +754,12 @@ def blog_to_html(post: dict) -> str:
                 cid = f"wc-chart-{_chart_counter[0]}"
                 _chart_counter[0] += 1
                 out += render_chart_js(ve, cid)
+            elif vtype == "stat_card_row":
+                out += render_stat_card_row(ve)
+            elif vtype == "comparison_card":
+                out += render_comparison_card(ve)
+            elif vtype == "callout":
+                out += render_callout(ve)
         return out
 
     intro_paras      = _paras(post.get("intro", "") or "")
