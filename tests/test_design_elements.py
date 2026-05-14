@@ -151,3 +151,88 @@ def test_render_email_visual_dispatches_correctly():
     assert render_email_visual({"type": "unknown_type"}) == ""
     ve = {"type": "email_divider_callout", "heading": "H", "body": "Body text here."}
     assert "Body text here." in render_email_visual(ve)
+
+
+# ── _render_ves dispatcher integration (via blog_to_html) ────────────────────
+
+from src.blog_generator import blog_to_html
+
+_MINIMAL_BLOG = {
+    "title": "Test Post",
+    "subtitle": "",
+    "byline": "By the Warren Editorial Desk",
+    "reading_time_minutes": 1,
+    "seo_tags": ["test"],
+    "intro": "Intro paragraph.",
+    "sections": [{"heading": "Section One", "content": "Content here.", "pull_quote": ""}],
+    "conclusion": "Conclusion.",
+    "key_takeaways": [],
+    "faqs": [],
+    "sources_cited": [],
+    "meta_description": "",
+    "visual_elements": [],
+    "hero_image_prompt": "",
+}
+
+
+def test_blog_to_html_renders_stat_card_row():
+    post = {**_MINIMAL_BLOG, "visual_elements": [
+        {"type": "stat_card_row", "after_section": -1,
+         "cards": [{"label": "Base Rate", "value": "5.25%", "note": "BoE"}]},
+    ]}
+    html = blog_to_html(post)
+    assert "5.25%" in html
+    assert "Base Rate" in html
+
+
+def test_blog_to_html_renders_comparison_card():
+    post = {**_MINIMAL_BLOG, "visual_elements": [
+        {"type": "comparison_card", "after_section": 0,
+         "title": "ISA types",
+         "columns": ["Feature", "Cash ISA"],
+         "rows": [["Allowance", "£20,000"]]},
+    ]}
+    html = blog_to_html(post)
+    assert "ISA types" in html
+    assert "£20,000" in html
+
+
+def test_blog_to_html_renders_callout():
+    post = {**_MINIMAL_BLOG, "visual_elements": [
+        {"type": "callout", "after_section": 0,
+         "icon": "⚠", "heading": "Note", "body": "Important regulatory note here."},
+    ]}
+    html = blog_to_html(post)
+    assert "Important regulatory note here." in html
+
+
+# ── formatter.to_html visual injection integration ───────────────────────────
+
+from src.formatter import to_html as nl_to_html
+
+_MINIMAL_NL = {
+    "subject_line": "Test Newsletter",
+    "intro": "Welcome.",
+    "sections": [
+        {"heading": "Savings", "summary": "Rates high.", "articles": [], "commentary": ""}
+    ],
+    "editor_pick": None,
+    "visual_elements": [],
+}
+
+
+def test_newsletter_to_html_injects_email_stat_row():
+    nl = {**_MINIMAL_NL, "visual_elements": [
+        {"type": "email_stat_row", "after_section": -1,
+         "cards": [{"label": "Base Rate", "value": "5.25%", "note": "BoE"}]},
+    ]}
+    html = nl_to_html(nl)
+    assert "5.25%" in html
+    assert "<script" not in html
+
+
+def test_newsletter_to_html_no_visuals_unchanged():
+    html_without = nl_to_html(_MINIMAL_NL)
+    nl_with_empty = {**_MINIMAL_NL, "visual_elements": []}
+    html_with_empty = nl_to_html(nl_with_empty)
+    assert html_without == html_with_empty

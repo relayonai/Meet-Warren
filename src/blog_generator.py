@@ -348,7 +348,7 @@ def _seo_brief_block(brief: Optional[dict]) -> str:
         f"\n★ SEO/AEO BRIEF (priority directive — every section serves this):\n"
         f"Primary keyword: {kw}\n"
         f"Target H1: {h1}\n"
-        f"Semantic keywords: {semantic}\n"
+        f"Semantic keywords (use these as your seo_tags field verbatim): {semantic}\n"
         f"Meta description brief: {meta}\n"
         f"FAQ seeds (use these verbatim as faqs):\n{faqs}\n"
         f"Answer-first sections (open each with a 1-sentence direct answer):\n{ans_first}\n"
