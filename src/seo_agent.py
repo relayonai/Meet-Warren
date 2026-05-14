@@ -90,7 +90,7 @@ def generate_seo_brief(
 
     prompt = _TEMPLATE.format(
         angle_note=angle_note,
-        articles_json=json.dumps(article_summaries, ensure_ascii=False, indent=2),
+        articles_json=json.dumps(article_summaries[:10], ensure_ascii=False, indent=2),
     )
     try:
         resp = client.messages.create(
